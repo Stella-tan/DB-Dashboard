@@ -2,7 +2,7 @@
 
 import { useState } from "react"
 import { useRouter } from "next/navigation"
-import { ChartGrid } from "./chart-grid"
+import { AIChartGrid } from "./ai-chart-grid"
 import { ChatbotPanel } from "./chatbot-panel"
 import { DashboardHeader } from "./dashboard-header"
 import { Sidebar } from "./sidebar"
@@ -51,7 +51,7 @@ export function DashboardLayout({ databases, chatbots }: DashboardLayoutProps) {
           {/* Chart Grid */}
           <div className="flex-1 overflow-auto p-6">
             {selectedDatabaseId && databases.length > 0 ? (
-              <ChartGrid databaseId={selectedDatabaseId} />
+              <AIChartGrid databaseId={selectedDatabaseId} />
             ) : databases.length === 0 ? (
               <div className="flex items-center justify-center h-full">
                 <div className="text-center max-w-md">

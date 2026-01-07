@@ -8,6 +8,8 @@
  * 
  * Usage:
  *   npx ts-node scripts/sync-data.ts
+ * # Sync ALL databases (UI-added + env)
+ *   npm run sync
  * 
  * Options:
  *   --db-id=<id>   Sync only a specific database by ID
