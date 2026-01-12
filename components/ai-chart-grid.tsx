@@ -4,10 +4,18 @@ import { useEffect, useState, useCallback } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { 
   Users, DollarSign, Package, Activity, TrendingUp, Wallet, 
   CheckCircle, Clock, RefreshCw, Sparkles, AlertCircle,
-  BarChart3, LineChartIcon, PieChart as PieChartIcon
+  BarChart3, LineChartIcon, PieChart as PieChartIcon, Zap,
+  Code, Copy, Check
 } from "lucide-react"
 import { 
   Line, LineChart, Bar, BarChart, Pie, PieChart,
@@ -63,14 +71,16 @@ interface KPIData {
 }
 
 const COLORS = [
-  "hsl(var(--chart-1))",
-  "hsl(var(--chart-2))",
-  "hsl(var(--chart-3))",
-  "hsl(var(--chart-4))",
-  "hsl(var(--chart-5))",
-  "#8884d8",
-  "#82ca9d",
-  "#ffc658",
+  "#3b82f6",  // Blue
+  "#10b981",  // Emerald/Teal
+  "#f59e0b",  // Amber/Orange
+  "#ef4444",  // Red
+  "#8b5cf6",  // Purple
+  "#06b6d4",  // Cyan
+  "#84cc16",  // Lime Green
+  "#f97316",  // Orange
+  "#ec4899",  // Pink
+  "#14b8a6",  // Teal
 ]
 
 const ICON_MAP: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -84,6 +94,128 @@ const ICON_MAP: Record<string, React.ComponentType<{ className?: string }>> = {
   "clock": Clock,
 }
 
+/**
+ * Generate SQL preview for a chart based on its configuration
+ */
+function generateChartSQL(chart: ChartConfig, databaseId: string): string {
+  const { table, columns, aggregation, type } = chart
+  const xColumn = columns?.x
+  const yColumn = columns?.y || 'id'
+  const groupBy = columns?.groupBy
+
+  // Build aggregation expression
+  let aggExpr: string
+  switch (aggregation) {
+    case 'count':
+      aggExpr = 'COUNT(*)'
+      break
+    case 'sum':
+      aggExpr = `SUM(CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '$.${yColumn}')) AS DECIMAL(20,2)))`
+      break
+    case 'avg':
+      aggExpr = `AVG(CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '$.${yColumn}')) AS DECIMAL(20,2)))`
+      break
+    case 'min':
+      aggExpr = `MIN(CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '$.${yColumn}')) AS DECIMAL(20,2)))`
+      break
+    case 'max':
+      aggExpr = `MAX(CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '$.${yColumn}')) AS DECIMAL(20,2)))`
+      break
+    default:
+      aggExpr = 'COUNT(*)'
+  }
+
+  // Pie chart or grouped data
+  if (type === 'pie' || groupBy) {
+    const groupColumn = groupBy || xColumn
+    return `SELECT 
+  COALESCE(
+    JSON_UNQUOTE(JSON_EXTRACT(data, '$.${groupColumn}')), 
+    'Unknown'
+  ) AS group_key,
+  ${aggExpr} AS result
+FROM synced_data
+WHERE database_id = '${databaseId}'
+  AND table_name = '${table}'
+GROUP BY group_key
+ORDER BY result DESC
+LIMIT 20;`
+  }
+
+  // Time series (date column)
+  if (xColumn) {
+    const dateKeywords = ['created_at', 'updated_at', 'date', 'timestamp', 'time', 'created', 'modified']
+    const isDateCol = dateKeywords.some(kw => xColumn.toLowerCase().includes(kw))
+
+    if (isDateCol) {
+      return `SELECT 
+  DATE(STR_TO_DATE(
+    JSON_UNQUOTE(JSON_EXTRACT(data, '$.${xColumn}')), 
+    '%Y-%m-%dT%H:%i:%s'
+  )) AS group_key,
+  ${aggExpr} AS result
+FROM synced_data
+WHERE database_id = '${databaseId}'
+  AND table_name = '${table}'
+  AND JSON_EXTRACT(data, '$.${xColumn}') IS NOT NULL
+GROUP BY group_key
+ORDER BY group_key ASC
+LIMIT 60;`
+    }
+
+    // Category grouping
+    return `SELECT 
+  COALESCE(
+    JSON_UNQUOTE(JSON_EXTRACT(data, '$.${xColumn}')), 
+    'Unknown'
+  ) AS group_key,
+  ${aggExpr} AS result
+FROM synced_data
+WHERE database_id = '${databaseId}'
+  AND table_name = '${table}'
+GROUP BY group_key
+ORDER BY result DESC
+LIMIT 20;`
+  }
+
+  // Simple aggregation (no grouping)
+  return `SELECT 
+  ${aggExpr} AS result,
+  COUNT(*) AS row_count
+FROM synced_data
+WHERE database_id = '${databaseId}'
+  AND table_name = '${table}';`
+}
+
+/**
+ * Generate SQL preview for a KPI based on its configuration
+ */
+function generateKPISQL(kpi: KPIConfig, databaseId: string): string {
+  const { table, column, aggregation } = kpi
+  
+  let aggExpr: string
+  switch (aggregation) {
+    case 'count':
+      aggExpr = 'COUNT(*)'
+      break
+    case 'sum':
+      aggExpr = `SUM(CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '$.${column}')) AS DECIMAL(20,2)))`
+      break
+    case 'avg':
+      aggExpr = `AVG(CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '$.${column}')) AS DECIMAL(20,2)))`
+      break
+    default:
+      aggExpr = 'COUNT(*)'
+  }
+
+  return `SELECT 
+  ${aggExpr} AS result,
+  COUNT(*) AS row_count
+FROM synced_data
+WHERE database_id = '${databaseId}'
+  AND table_name = '${table}';`
+}
+
 export function AIChartGrid({ databaseId }: AIChartGridProps) {
   const [loading, setLoading] = useState(true)
   const [generating, setGenerating] = useState(false)
@@ -92,30 +224,111 @@ export function AIChartGrid({ databaseId }: AIChartGridProps) {
   const [aiReasoning, setAiReasoning] = useState<string>("")
   const [chartDataMap, setChartDataMap] = useState<Record<string, ChartData>>({})
   const [kpiDataMap, setKpiDataMap] = useState<Record<string, KPIData>>({})
+  const [loadedFromCache, setLoadedFromCache] = useState(false)
+  const [cacheTime, setCacheTime] = useState<string | null>(null)
+  
+  // SQL Preview Dialog state
+  const [sqlDialogOpen, setSqlDialogOpen] = useState(false)
+  const [sqlDialogTitle, setSqlDialogTitle] = useState("")
+  const [sqlDialogContent, setSqlDialogContent] = useState("")
+  const [sqlCopied, setSqlCopied] = useState(false)
 
-  // Load or generate dashboard configuration
+  // Show SQL for a chart
+  const showChartSQL = (chart: ChartConfig) => {
+    setSqlDialogTitle(chart.title)
+    setSqlDialogContent(generateChartSQL(chart, databaseId))
+    setSqlDialogOpen(true)
+    setSqlCopied(false)
+  }
+
+  // Show SQL for a KPI
+  const showKPISQL = (kpi: KPIConfig) => {
+    setSqlDialogTitle(kpi.title)
+    setSqlDialogContent(generateKPISQL(kpi, databaseId))
+    setSqlDialogOpen(true)
+    setSqlCopied(false)
+  }
+
+  // Copy SQL to clipboard
+  const copySQL = async () => {
+    try {
+      await navigator.clipboard.writeText(sqlDialogContent)
+      setSqlCopied(true)
+      setTimeout(() => setSqlCopied(false), 2000)
+    } catch (err) {
+      console.error('Failed to copy:', err)
+    }
+  }
+
+  // Load dashboard from cache (INSTANT) or generate with AI
   const loadOrGenerateConfig = useCallback(async (forceRegenerate = false) => {
     setLoading(true)
     setError(null)
+    setLoadedFromCache(false)
 
     try {
-      // First, check if there's an existing config
+      // STEP 1: Try to load from CACHE first (instant loading)
       if (!forceRegenerate) {
-        const configResponse = await fetch(`/api/ai-dashboard/config?databaseId=${databaseId}`)
-        const configResult = await configResponse.json()
+        const cacheResponse = await fetch(`/api/ai-dashboard/cache?databaseId=${databaseId}`)
+        const cacheResult = await cacheResponse.json()
 
-        if (configResult.exists && configResult.config) {
-          setConfig(configResult.config)
-          setAiReasoning(configResult.aiReasoning || "")
+        if (cacheResult.success && cacheResult.cached) {
+          console.log("⚡ Loaded dashboard from cache (instant!)")
+          
+          // Build config from cached items
+          const charts: ChartConfig[] = cacheResult.charts.map((c: { config: ChartConfig }) => c.config)
+          const kpis: KPIConfig[] = cacheResult.kpis.map((k: { config: KPIConfig }) => k.config)
+          
+          setConfig({ charts, kpis })
+          setCacheTime(cacheResult.computedAt)
+          setLoadedFromCache(true)
+          
+          // Set chart data from cache
+          const chartData: Record<string, ChartData> = {}
+          for (const c of cacheResult.charts) {
+            chartData[c.id] = { data: c.data, loading: false }
+          }
+          setChartDataMap(chartData)
+          
+          // Set KPI data from cache
+          const kpiData: Record<string, KPIData> = {}
+          for (const k of cacheResult.kpis) {
+            kpiData[k.id] = { 
+              value: k.data.value, 
+              growth: k.data.growth, 
+              loading: false 
+            }
+          }
+          setKpiDataMap(kpiData)
+          
+          // Also try to get AI reasoning from config
+          const configResponse = await fetch(`/api/ai-dashboard/config?databaseId=${databaseId}`)
+          const configResult = await configResponse.json()
+          if (configResult.exists && configResult.aiReasoning) {
+            setAiReasoning(configResult.aiReasoning)
+          }
+          
           setLoading(false)
           return
         }
       }
 
-      // No existing config or force regenerate - generate with AI
+      // STEP 2: No cache - check if config exists (need to compute data)
+      if (!forceRegenerate) {
+        const configResponse = await fetch(`/api/ai-dashboard/config?databaseId=${databaseId}`)
+        const configResult = await configResponse.json()
+
+        if (configResult.exists && configResult.config) {
+          // Config exists but no cache - this is a legacy state
+          // We'll regenerate to populate the cache
+          console.log("📋 Config exists but no cache. Regenerating to cache data...")
+        }
+      }
+
+      // STEP 3: Generate with AI (this will also cache the data)
       setGenerating(true)
 
-      // Step 1: Discover tables and sample data
+      // Discover tables
       const discoverResponse = await fetch(`/api/ai-dashboard/discover?databaseId=${databaseId}`)
       const discoverResult = await discoverResponse.json()
 
@@ -126,7 +339,7 @@ export function AIChartGrid({ databaseId }: AIChartGridProps) {
         return
       }
 
-      // Step 2: Generate AI configuration
+      // Generate AI configuration (this also caches all data!)
       const generateResponse = await fetch("/api/ai-dashboard/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -147,6 +360,34 @@ export function AIChartGrid({ databaseId }: AIChartGridProps) {
       setConfig(generateResult.config)
       setAiReasoning(generateResult.config.reasoning || "")
       setGenerating(false)
+      
+      // After generation, load from cache (data is now cached)
+      const cacheResponse = await fetch(`/api/ai-dashboard/cache?databaseId=${databaseId}`)
+      const cacheResult = await cacheResponse.json()
+      
+      if (cacheResult.success && cacheResult.cached) {
+        // Set chart data from cache
+        const chartData: Record<string, ChartData> = {}
+        for (const c of cacheResult.charts) {
+          chartData[c.id] = { data: c.data, loading: false }
+        }
+        setChartDataMap(chartData)
+        
+        // Set KPI data from cache
+        const kpiData: Record<string, KPIData> = {}
+        for (const k of cacheResult.kpis) {
+          kpiData[k.id] = { 
+            value: k.data.value, 
+            growth: k.data.growth, 
+            loading: false 
+          }
+        }
+        setKpiDataMap(kpiData)
+        
+        setCacheTime(cacheResult.computedAt)
+        setLoadedFromCache(true)
+      }
+      
       setLoading(false)
     } catch (err) {
       console.error("Error loading/generating config:", err)
@@ -156,109 +397,18 @@ export function AIChartGrid({ databaseId }: AIChartGridProps) {
     }
   }, [databaseId])
 
-  // Load chart data for each chart in config
-  const loadChartData = useCallback(async (charts: ChartConfig[]) => {
-    const newChartData: Record<string, ChartData> = {}
-
-    for (const chart of charts) {
-      newChartData[chart.id] = { data: [], loading: true }
-    }
-    setChartDataMap(newChartData)
-
-    // Load data for each chart
-    for (const chart of charts) {
-      try {
-        const response = await fetch("/api/ai-dashboard/chart-data", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ databaseId, chart }),
-        })
-        const result = await response.json()
-
-        setChartDataMap(prev => ({
-          ...prev,
-          [chart.id]: {
-            data: result.data || [],
-            loading: false,
-            error: result.error,
-          },
-        }))
-      } catch (err) {
-        setChartDataMap(prev => ({
-          ...prev,
-          [chart.id]: {
-            data: [],
-            loading: false,
-            error: err instanceof Error ? err.message : "Failed to load data",
-          },
-        }))
-      }
-    }
-  }, [databaseId])
-
-  // Load KPI data for each KPI in config
-  const loadKPIData = useCallback(async (kpis: KPIConfig[]) => {
-    const newKpiData: Record<string, KPIData> = {}
-
-    for (const kpi of kpis) {
-      newKpiData[kpi.id] = { value: 0, growth: 0, loading: true }
-    }
-    setKpiDataMap(newKpiData)
-
-    // Load data for each KPI
-    for (const kpi of kpis) {
-      try {
-        const response = await fetch("/api/ai-dashboard/kpi-data", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ databaseId, kpi }),
-        })
-        const result = await response.json()
-
-        setKpiDataMap(prev => ({
-          ...prev,
-          [kpi.id]: {
-            value: result.value || 0,
-            growth: result.growth || 0,
-            loading: false,
-            error: result.error,
-          },
-        }))
-      } catch (err) {
-        setKpiDataMap(prev => ({
-          ...prev,
-          [kpi.id]: {
-            value: 0,
-            growth: 0,
-            loading: false,
-            error: err instanceof Error ? err.message : "Failed to load data",
-          },
-        }))
-      }
-    }
-  }, [databaseId])
-
   // Initial load
   useEffect(() => {
     loadOrGenerateConfig()
   }, [loadOrGenerateConfig])
 
-  // Load data when config changes
-  useEffect(() => {
-    if (config) {
-      if (config.charts && config.charts.length > 0) {
-        loadChartData(config.charts)
-      }
-      if (config.kpis && config.kpis.length > 0) {
-        loadKPIData(config.kpis)
-      }
-    }
-  }, [config, loadChartData, loadKPIData])
-
   // Handle regenerate
   const handleRegenerate = async () => {
-    // Delete existing config
+    // Delete existing config and cache
     await fetch(`/api/ai-dashboard/config?databaseId=${databaseId}`, {
+      method: "DELETE",
+    })
+    await fetch(`/api/ai-dashboard/cache?databaseId=${databaseId}`, {
       method: "DELETE",
     })
     // Regenerate
@@ -289,7 +439,7 @@ export function AIChartGrid({ databaseId }: AIChartGridProps) {
         {generating && (
           <div className="flex items-center gap-2 p-4 bg-primary/10 rounded-lg">
             <Sparkles className="w-5 h-5 text-primary animate-pulse" />
-            <span className="text-sm">AI is analyzing your data and generating the optimal dashboard...</span>
+            <span className="text-sm">AI is analyzing your data and generating the optimal dashboard... This may take a moment.</span>
           </div>
         )}
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
@@ -337,15 +487,28 @@ export function AIChartGrid({ databaseId }: AIChartGridProps) {
     <div className="space-y-6">
       {/* AI Reasoning & Regenerate Button */}
       <div className="flex items-start justify-between gap-4">
-        {aiReasoning && (
-          <div className="flex-1 p-3 bg-muted/50 rounded-lg">
-            <div className="flex items-center gap-2 text-xs text-muted-foreground mb-1">
-              <Sparkles className="w-3 h-3" />
-              AI Analysis
+        <div className="flex-1 space-y-2">
+          {loadedFromCache && (
+            <div className="flex items-center gap-2 text-xs text-green-600 dark:text-green-400">
+              <Zap className="w-3 h-3" />
+              Loaded instantly from cache
+              {cacheTime && (
+                <span className="text-muted-foreground">
+                  (computed {new Date(cacheTime).toLocaleString()})
+                </span>
+              )}
             </div>
-            <p className="text-sm">{aiReasoning}</p>
-          </div>
-        )}
+          )}
+          {aiReasoning && (
+            <div className="p-3 bg-muted/50 rounded-lg">
+              <div className="flex items-center gap-2 text-xs text-muted-foreground mb-1">
+                <Sparkles className="w-3 h-3" />
+                AI Analysis
+              </div>
+              <p className="text-sm">{aiReasoning}</p>
+            </div>
+          )}
+        </div>
         <Button onClick={handleRegenerate} variant="outline" size="sm">
           <RefreshCw className="w-4 h-4 mr-2" />
           Regenerate
@@ -363,7 +526,18 @@ export function AIChartGrid({ databaseId }: AIChartGridProps) {
               <Card key={kpi.id}>
                 <CardHeader className="flex flex-row items-center justify-between pb-2">
                   <CardTitle className="text-sm font-medium">{kpi.title}</CardTitle>
-                  <IconComponent className="w-4 h-4 text-muted-foreground" />
+                  <div className="flex items-center gap-1">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6"
+                      onClick={() => showKPISQL(kpi)}
+                      title="View SQL Query"
+                    >
+                      <Code className="w-3 h-3 text-muted-foreground" />
+                    </Button>
+                    <IconComponent className="w-4 h-4 text-muted-foreground" />
+                  </div>
                 </CardHeader>
                 <CardContent>
                   {!data || data.loading ? (
@@ -395,21 +569,33 @@ export function AIChartGrid({ databaseId }: AIChartGridProps) {
       {/* Charts */}
       {config.charts && config.charts.length > 0 && (
         <div className="grid gap-6 md:grid-cols-2">
-          {config.charts.map((chart) => {
+          {config.charts.map((chart, chartIndex) => {
             const data = chartDataMap[chart.id]
+            const chartColor = COLORS[chartIndex % COLORS.length]
 
             return (
               <Card key={chart.id}>
                 <CardHeader>
                   <div className="flex items-center justify-between">
                     <CardTitle>{chart.title}</CardTitle>
-                    {chart.type === "line" && <LineChartIcon className="w-5 h-5 text-muted-foreground" />}
-                    {chart.type === "bar" && <BarChart3 className="w-5 h-5 text-muted-foreground" />}
-                    {chart.type === "pie" && <PieChartIcon className="w-5 h-5 text-muted-foreground" />}
-                    {chart.type === "area" && <TrendingUp className="w-5 h-5 text-muted-foreground" />}
+                    <div className="flex items-center gap-1">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7"
+                        onClick={() => showChartSQL(chart)}
+                        title="View SQL Query"
+                      >
+                        <Code className="w-4 h-4 text-muted-foreground" />
+                      </Button>
+                      {chart.type === "line" && <LineChartIcon className="w-5 h-5 text-muted-foreground" />}
+                      {chart.type === "bar" && <BarChart3 className="w-5 h-5 text-muted-foreground" />}
+                      {chart.type === "pie" && <PieChartIcon className="w-5 h-5 text-muted-foreground" />}
+                      {chart.type === "area" && <TrendingUp className="w-5 h-5 text-muted-foreground" />}
+                    </div>
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    Source: {chart.table} • {chart.aggregation}({chart.columns.y})
+                    Source: {chart.table} • {chart.aggregation}({chart.columns?.y || 'value'})
                   </p>
                 </CardHeader>
                 <CardContent>
@@ -425,11 +611,11 @@ export function AIChartGrid({ databaseId }: AIChartGridProps) {
                     </div>
                   ) : (
                     <ChartContainer 
-                      config={{ value: { label: chart.columns.y, color: COLORS[0] } }} 
+                      config={{ value: { label: chart.columns?.y || 'value', color: chartColor } }} 
                       className="h-64"
                     >
                       <ResponsiveContainer width="100%" height="100%">
-                        {renderChart(chart, data.data)}
+                        {renderChart(chart, data.data, chartIndex)}
                       </ResponsiveContainer>
                     </ChartContainer>
                   )}
@@ -439,22 +625,73 @@ export function AIChartGrid({ databaseId }: AIChartGridProps) {
           })}
         </div>
       )}
+
+      {/* SQL Preview Dialog */}
+      <Dialog open={sqlDialogOpen} onOpenChange={setSqlDialogOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Code className="w-5 h-5" />
+              SQL Query - {sqlDialogTitle}
+            </DialogTitle>
+            <DialogDescription>
+              This is the MySQL query used to generate the data for this chart/KPI.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="relative">
+            <pre className="bg-muted p-4 rounded-lg overflow-x-auto text-sm font-mono">
+              {sqlDialogContent}
+            </pre>
+            <Button
+              variant="outline"
+              size="sm"
+              className="absolute top-2 right-2"
+              onClick={copySQL}
+            >
+              {sqlCopied ? (
+                <>
+                  <Check className="w-4 h-4 mr-1 text-green-600" />
+                  Copied!
+                </>
+              ) : (
+                <>
+                  <Copy className="w-4 h-4 mr-1" />
+                  Copy
+                </>
+              )}
+            </Button>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Note: This SQL runs against the synced_data table which stores your external data in JSON format.
+          </p>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
 
-function renderChart(chart: ChartConfig, data: Record<string, unknown>[]) {
-  const dataKey = data.length > 0 ? (
-    'value' in data[0] ? 'value' : 
-    Object.keys(data[0]).find(k => k !== 'date' && k !== 'name' && k !== 'category') || 'value'
-  ) : 'value'
+function renderChart(chart: ChartConfig, rawData: unknown, chartIndex: number = 0) {
+  // Ensure data is always an array
+  const data: Record<string, unknown>[] = Array.isArray(rawData) ? rawData : []
   
-  const xKey = data.length > 0 ? (
-    'date' in data[0] ? 'date' : 
+  if (data.length === 0) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <p className="text-sm text-muted-foreground">No data available</p>
+      </div>
+    )
+  }
+  
+  const dataKey = 'value' in data[0] ? 'value' : 
+    Object.keys(data[0]).find(k => k !== 'date' && k !== 'name' && k !== 'category') || 'value'
+  
+  const xKey = 'date' in data[0] ? 'date' : 
     'name' in data[0] ? 'name' :
     'category' in data[0] ? 'category' :
     Object.keys(data[0])[0]
-  ) : 'date'
+
+  // Each chart gets its own color based on its index
+  const chartColor = COLORS[chartIndex % COLORS.length]
 
   switch (chart.type) {
     case "line":
@@ -467,9 +704,9 @@ function renderChart(chart: ChartConfig, data: Record<string, unknown>[]) {
           <Line 
             type="monotone" 
             dataKey={dataKey} 
-            stroke={COLORS[0]} 
+            stroke={chartColor} 
             strokeWidth={2}
-            dot={{ fill: COLORS[0], strokeWidth: 2 }}
+            dot={{ fill: chartColor, strokeWidth: 2 }}
           />
         </LineChart>
       )
@@ -481,7 +718,7 @@ function renderChart(chart: ChartConfig, data: Record<string, unknown>[]) {
           <XAxis dataKey={xKey} className="text-xs" />
           <YAxis className="text-xs" />
           <ChartTooltip content={<ChartTooltipContent />} />
-          <Bar dataKey={dataKey} fill={COLORS[0]} radius={[4, 4, 0, 0]} />
+          <Bar dataKey={dataKey} fill={chartColor} radius={[4, 4, 0, 0]} />
         </BarChart>
       )
 
@@ -495,8 +732,8 @@ function renderChart(chart: ChartConfig, data: Record<string, unknown>[]) {
           <Area 
             type="monotone" 
             dataKey={dataKey} 
-            stroke={COLORS[0]} 
-            fill={COLORS[0]} 
+            stroke={chartColor} 
+            fill={chartColor} 
             fillOpacity={0.3}
           />
         </AreaChart>
@@ -512,7 +749,7 @@ function renderChart(chart: ChartConfig, data: Record<string, unknown>[]) {
             labelLine={false}
             label={({ name, percent }) => `${name} (${(percent * 100).toFixed(0)}%)`}
             outerRadius={80}
-            fill="#8884d8"
+            fill={chartColor}
             dataKey={dataKey}
             nameKey={xKey}
           >
@@ -532,9 +769,8 @@ function renderChart(chart: ChartConfig, data: Record<string, unknown>[]) {
           <XAxis dataKey={xKey} className="text-xs" />
           <YAxis className="text-xs" />
           <ChartTooltip content={<ChartTooltipContent />} />
-          <Bar dataKey={dataKey} fill={COLORS[0]} radius={[4, 4, 0, 0]} />
+          <Bar dataKey={dataKey} fill={chartColor} radius={[4, 4, 0, 0]} />
         </BarChart>
       )
   }
 }
-

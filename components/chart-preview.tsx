@@ -2,10 +2,23 @@
 
 import { useMemo } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Line, LineChart, Bar, BarChart, CartesianGrid, XAxis, YAxis, ResponsiveContainer, PieChart, Pie, Cell, Area, AreaChart } from "recharts"
-import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart"
+import { Line, LineChart, Bar, BarChart, CartesianGrid, XAxis, YAxis, ResponsiveContainer, PieChart, Pie, Cell, Area, AreaChart, Legend, Tooltip } from "recharts"
 import { useSyncedData } from "@/hooks/use-synced-data"
 import { Skeleton } from "@/components/ui/skeleton"
+
+// Define a color palette for charts
+const CHART_COLORS = [
+  "#3b82f6", // blue
+  "#10b981", // emerald
+  "#f59e0b", // amber
+  "#ef4444", // red
+  "#8b5cf6", // violet
+  "#06b6d4", // cyan
+  "#f97316", // orange
+  "#84cc16", // lime
+  "#ec4899", // pink
+  "#6366f1", // indigo
+]
 
 interface ChartPreviewProps {
   config: {
@@ -100,17 +113,8 @@ export function ChartPreview({ config, databaseId }: ChartPreviewProps) {
     })
   }, [rawData, config.dataSource.xAxis, config.dataSource.yAxis, config.groupBy, config.aggregation])
 
-  // Build chart config
-  const chartConfig = useMemo(() => {
-    const configObj: any = {}
-    config.dataSource.yAxis.forEach((key, index) => {
-      configObj[key] = {
-        label: key,
-        color: `hsl(var(--chart-${(index % 5) + 1}))`,
-      }
-    })
-    return configObj
-  }, [config.dataSource.yAxis])
+  // Helper function to get color by index
+  const getColor = (index: number) => CHART_COLORS[index % CHART_COLORS.length]
 
   const renderChart = () => {
     console.log("[ChartPreview] renderChart - loading:", loading, "error:", error, "table:", config.dataSource.table, "chartData length:", chartData.length)
@@ -148,69 +152,95 @@ export function ChartPreview({ config, databaseId }: ChartPreviewProps) {
     switch (config.chartType) {
       case "line":
         return (
-          <ChartContainer config={chartConfig} className="h-64">
+          <div className="h-64 w-full">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={chartData}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey={xAxisKey} />
-                <YAxis />
-                <ChartTooltip content={<ChartTooltipContent />} />
-                {config.dataSource.yAxis.map((key) => (
+                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                <XAxis dataKey={xAxisKey} tick={{ fill: '#6b7280', fontSize: 12 }} />
+                <YAxis tick={{ fill: '#6b7280', fontSize: 12 }} />
+                <Tooltip 
+                  contentStyle={{ 
+                    backgroundColor: 'white', 
+                    border: '1px solid #e5e7eb',
+                    borderRadius: '8px',
+                    boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
+                  }} 
+                />
+                <Legend />
+                {config.dataSource.yAxis.map((key, index) => (
                   <Line
                     key={key}
                     type="monotone"
                     dataKey={key}
-                    stroke={`var(--color-${key})`}
+                    stroke={getColor(index)}
                     strokeWidth={2}
+                    dot={{ fill: getColor(index), strokeWidth: 2, r: 4 }}
+                    activeDot={{ r: 6 }}
                   />
                 ))}
               </LineChart>
             </ResponsiveContainer>
-          </ChartContainer>
+          </div>
         )
       case "bar":
         return (
-          <ChartContainer config={chartConfig} className="h-64">
+          <div className="h-64 w-full">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={chartData}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey={xAxisKey} />
-                <YAxis />
-                <ChartTooltip content={<ChartTooltipContent />} />
-                {config.dataSource.yAxis.map((key) => (
+                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                <XAxis dataKey={xAxisKey} tick={{ fill: '#6b7280', fontSize: 12 }} />
+                <YAxis tick={{ fill: '#6b7280', fontSize: 12 }} />
+                <Tooltip 
+                  contentStyle={{ 
+                    backgroundColor: 'white', 
+                    border: '1px solid #e5e7eb',
+                    borderRadius: '8px',
+                    boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
+                  }} 
+                />
+                <Legend />
+                {config.dataSource.yAxis.map((key, index) => (
                   <Bar
                     key={key}
                     dataKey={key}
-                    fill={`var(--color-${key})`}
+                    fill={getColor(index)}
                     radius={[4, 4, 0, 0]}
                   />
                 ))}
               </BarChart>
             </ResponsiveContainer>
-          </ChartContainer>
+          </div>
         )
       case "area":
         return (
-          <ChartContainer config={chartConfig} className="h-64">
+          <div className="h-64 w-full">
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={chartData}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey={xAxisKey} />
-                <YAxis />
-                <ChartTooltip content={<ChartTooltipContent />} />
-                {config.dataSource.yAxis.map((key) => (
+                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                <XAxis dataKey={xAxisKey} tick={{ fill: '#6b7280', fontSize: 12 }} />
+                <YAxis tick={{ fill: '#6b7280', fontSize: 12 }} />
+                <Tooltip 
+                  contentStyle={{ 
+                    backgroundColor: 'white', 
+                    border: '1px solid #e5e7eb',
+                    borderRadius: '8px',
+                    boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
+                  }} 
+                />
+                <Legend />
+                {config.dataSource.yAxis.map((key, index) => (
                   <Area
                     key={key}
                     type="monotone"
                     dataKey={key}
-                    stroke={`var(--color-${key})`}
-                    fill={`var(--color-${key})`}
-                    fillOpacity={0.6}
+                    stroke={getColor(index)}
+                    fill={getColor(index)}
+                    fillOpacity={0.3}
                   />
                 ))}
               </AreaChart>
             </ResponsiveContainer>
-          </ChartContainer>
+          </div>
         )
       case "pie":
         // Pie chart uses first yAxis key
@@ -219,7 +249,7 @@ export function ChartPreview({ config, databaseId }: ChartPreviewProps) {
           value: parseFloat(row[config.dataSource.yAxis[0]] || 0),
         }))
         return (
-          <ChartContainer config={chartConfig} className="h-64">
+          <div className="h-64 w-full">
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
                 <Pie
@@ -229,16 +259,25 @@ export function ChartPreview({ config, databaseId }: ChartPreviewProps) {
                   cx="50%"
                   cy="50%"
                   outerRadius={80}
-                  label
+                  label={({ name, percent }) => `${name}: ${(percent * 100).toFixed(0)}%`}
+                  labelLine={{ stroke: '#6b7280' }}
                 >
                   {pieData.map((entry, index) => (
-                    <Cell key={`cell-${index}`} fill={`hsl(var(--chart-${(index % 5) + 1}))`} />
+                    <Cell key={`cell-${index}`} fill={getColor(index)} />
                   ))}
                 </Pie>
-                <ChartTooltip content={<ChartTooltipContent />} />
+                <Tooltip 
+                  contentStyle={{ 
+                    backgroundColor: 'white', 
+                    border: '1px solid #e5e7eb',
+                    borderRadius: '8px',
+                    boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
+                  }} 
+                />
+                <Legend />
               </PieChart>
             </ResponsiveContainer>
-          </ChartContainer>
+          </div>
         )
       default:
         return (

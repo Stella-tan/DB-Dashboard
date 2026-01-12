@@ -84,6 +84,192 @@ function generateUUID(): string {
 }
 
 /**
+ * Refresh dashboard cache for a database using existing config (no AI call)
+ * This recomputes all chart/KPI data with fresh synced data
+ */
+async function refreshDashboardCache(
+  mysqlConn: mysql.Connection,
+  databaseId: string,
+  databaseName: string
+): Promise<void> {
+  try {
+    console.log(`\n🔄 Refreshing cache for: ${databaseName}`)
+    
+    // Check if dashboard config exists
+    const [configRows] = await mysqlConn.execute(
+      'SELECT config FROM ai_dashboard_configs WHERE database_id = ?',
+      [databaseId]
+    ) as any[]
+    
+    if (!configRows || configRows.length === 0) {
+      console.log(`   ⏭️  No dashboard config found - skipping (generate via UI first)`)
+      return
+    }
+    
+    const config = typeof configRows[0].config === 'string' 
+      ? JSON.parse(configRows[0].config) 
+      : configRows[0].config
+    
+    const charts = config.charts || []
+    const kpis = config.kpis || []
+    
+    if (charts.length === 0 && kpis.length === 0) {
+      console.log(`   ⏭️  No charts/KPIs configured - skipping`)
+      return
+    }
+    
+    console.log(`   📊 Found ${charts.length} charts and ${kpis.length} KPIs to refresh`)
+    
+    // Clear existing cache
+    await mysqlConn.execute(
+      'DELETE FROM ai_dashboard_cache WHERE database_id = ?',
+      [databaseId]
+    )
+    
+    // Refresh each chart
+    for (const chart of charts) {
+      try {
+        const data = await computeChartDataDirect(mysqlConn, databaseId, chart)
+        await mysqlConn.execute(
+          `INSERT INTO ai_dashboard_cache (id, database_id, item_id, item_type, config, computed_data, computed_at)
+           VALUES (?, ?, ?, 'chart', ?, ?, NOW())`,
+          [generateUUID(), databaseId, chart.id, JSON.stringify(chart), JSON.stringify(data)]
+        )
+        console.log(`      ✓ ${chart.title}`)
+      } catch (err: any) {
+        console.log(`      ✗ ${chart.title}: ${err.message}`)
+      }
+    }
+    
+    // Refresh each KPI
+    for (const kpi of kpis) {
+      try {
+        const data = await computeKPIDataDirect(mysqlConn, databaseId, kpi)
+        await mysqlConn.execute(
+          `INSERT INTO ai_dashboard_cache (id, database_id, item_id, item_type, config, computed_data, computed_at)
+           VALUES (?, ?, ?, 'kpi', ?, ?, NOW())`,
+          [generateUUID(), databaseId, kpi.id, JSON.stringify(kpi), JSON.stringify(data)]
+        )
+        console.log(`      ✓ ${kpi.title}`)
+      } catch (err: any) {
+        console.log(`      ✗ ${kpi.title}: ${err.message}`)
+      }
+    }
+    
+    console.log(`   ✅ Cache refreshed!`)
+  } catch (error: any) {
+    console.log(`   ⚠️  Cache refresh failed: ${error.message}`)
+  }
+}
+
+/**
+ * Compute chart data directly using MySQL connection
+ */
+async function computeChartDataDirect(
+  mysqlConn: mysql.Connection,
+  databaseId: string,
+  chart: any
+): Promise<any[]> {
+  const { table, columns, aggregation, type } = chart
+  const xColumn = columns?.x
+  const yColumn = columns?.y || 'id'
+  const groupBy = columns?.groupBy
+
+  const yPath = `$.${yColumn}`
+  let aggregationExpr: string
+
+  switch (aggregation) {
+    case "count":
+      aggregationExpr = `COUNT(*)`
+      break
+    case "sum":
+      aggregationExpr = `COALESCE(SUM(CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '${yPath}')) AS DECIMAL(20,2))), 0)`
+      break
+    case "avg":
+      aggregationExpr = `COALESCE(AVG(CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '${yPath}')) AS DECIMAL(20,2))), 0)`
+      break
+    case "min":
+      aggregationExpr = `COALESCE(MIN(CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '${yPath}')) AS DECIMAL(20,2))), 0)`
+      break
+    case "max":
+      aggregationExpr = `COALESCE(MAX(CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '${yPath}')) AS DECIMAL(20,2))), 0)`
+      break
+    default:
+      aggregationExpr = `COUNT(*)`
+  }
+
+  // Simplified query - group by category or count
+  if (type === "pie" || groupBy || xColumn) {
+    const groupColumn = groupBy || xColumn
+    if (!groupColumn) return []
+
+    const groupPath = `$.${groupColumn}`
+    const [rows] = await mysqlConn.execute(
+      `SELECT 
+        COALESCE(JSON_UNQUOTE(JSON_EXTRACT(data, '${groupPath}')), 'Unknown') as group_key,
+        ${aggregationExpr} as result
+       FROM synced_data
+       WHERE database_id = ? AND table_name = ?
+       GROUP BY group_key
+       ORDER BY result DESC
+       LIMIT 20`,
+      [databaseId, table]
+    ) as any[]
+
+    return rows.map((row: any) => ({
+      name: String(row.group_key),
+      value: Math.round(parseFloat(String(row.result)) * 100) / 100
+    }))
+  }
+
+  // Single aggregate
+  const [rows] = await mysqlConn.execute(
+    `SELECT ${aggregationExpr} as result FROM synced_data WHERE database_id = ? AND table_name = ?`,
+    [databaseId, table]
+  ) as any[]
+
+  if (rows.length > 0) {
+    return [{ value: Math.round(parseFloat(String(rows[0].result)) * 100) / 100 }]
+  }
+  return []
+}
+
+/**
+ * Compute KPI data directly using MySQL connection
+ */
+async function computeKPIDataDirect(
+  mysqlConn: mysql.Connection,
+  databaseId: string,
+  kpi: any
+): Promise<{ value: number; growth: number }> {
+  const { table, column, aggregation } = kpi
+  const jsonPath = `$.${column}`
+
+  let aggregationSQL: string
+  switch (aggregation) {
+    case "count":
+      aggregationSQL = `COUNT(*)`
+      break
+    case "sum":
+      aggregationSQL = `COALESCE(SUM(CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '${jsonPath}')) AS DECIMAL(20,2))), 0)`
+      break
+    case "avg":
+      aggregationSQL = `COALESCE(AVG(CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '${jsonPath}')) AS DECIMAL(20,2))), 0)`
+      break
+    default:
+      aggregationSQL = `COUNT(*)`
+  }
+
+  const [rows] = await mysqlConn.execute(
+    `SELECT ${aggregationSQL} as result FROM synced_data WHERE database_id = ? AND table_name = ?`,
+    [databaseId, table]
+  ) as any[]
+
+  const value = rows.length > 0 ? parseFloat(String(rows[0].result)) || 0 : 0
+  return { value: Math.round(value * 100) / 100, growth: 0 }
+}
+
+/**
  * Parse connection string to extract credentials
  * Supports formats:
  *   - Supabase: "https://xxx.supabase.co|eyJhbGci..."
@@ -407,10 +593,11 @@ async function syncSupabaseTable(
       const originalId = row.id ? String(row.id) : generateUUID()
       const rowData = JSON.stringify(row)
       
+      // Include database_id and table_name for optimized queries (denormalization)
       await mysqlConn.execute(
-        `INSERT INTO synced_data (id, synced_table_id, original_id, data, synced_at)
-         VALUES (?, ?, ?, ?, NOW())`,
-        [generateUUID(), syncedTableId, originalId, rowData]
+        `INSERT INTO synced_data (id, synced_table_id, database_id, table_name, original_id, data, synced_at)
+         VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+        [generateUUID(), syncedTableId, databaseId, tableName, originalId, rowData]
       )
       insertedCount++
     }
@@ -469,10 +656,11 @@ async function syncMySQLTable(
       const originalId = row.id ? String(row.id) : generateUUID()
       const rowData = JSON.stringify(row)
       
+      // Include database_id and table_name for optimized queries (denormalization)
       await mysqlConn.execute(
-        `INSERT INTO synced_data (id, synced_table_id, original_id, data, synced_at)
-         VALUES (?, ?, ?, ?, NOW())`,
-        [generateUUID(), syncedTableId, originalId, rowData]
+        `INSERT INTO synced_data (id, synced_table_id, database_id, table_name, original_id, data, synced_at)
+         VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+        [generateUUID(), syncedTableId, databaseId, tableName, originalId, rowData]
       )
       insertedCount++
     }
@@ -702,6 +890,16 @@ async function main() {
     for (const db of databasesToSync) {
       const result = await syncDatabase(mysqlConn, db)
       allResults.push(result)
+    }
+    
+    // Refresh dashboard cache for each synced database (using existing config, no AI)
+    console.log('\n')
+    console.log('╔════════════════════════════════════════════════════════════════╗')
+    console.log('║                REFRESHING DASHBOARD CACHE                      ║')
+    console.log('╚════════════════════════════════════════════════════════════════╝')
+    
+    for (const db of databasesToSync) {
+      await refreshDashboardCache(mysqlConn, db.id, db.name)
     }
     
     // Print summary

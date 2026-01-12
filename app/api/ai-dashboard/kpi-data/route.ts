@@ -13,17 +13,15 @@ interface KPIDataRequest {
   }
 }
 
-interface SyncedTable {
-  id: string
-  table_name: string
-}
-
-interface DataRow {
-  data: string
+interface AggregationResult {
+  result: string | number | null
+  row_count: number
 }
 
 /**
- * Fetch data for a specific KPI based on AI configuration
+ * Fetch KPI data using MySQL aggregation for better performance
+ * OPTIMIZED: Uses denormalized database_id/table_name columns to avoid JOINs
+ * With simplified growth calculation to avoid slow queries
  */
 export async function POST(req: Request) {
   try {
@@ -36,107 +34,95 @@ export async function POST(req: Request) {
       )
     }
 
-    // Get the synced table ID
-    const syncedTables = await query<SyncedTable>(
-      `SELECT id, table_name FROM synced_tables WHERE database_id = ? AND table_name = ?`,
-      [databaseId, kpi.table]
-    )
+    const { table, column, aggregation } = kpi
 
-    if (syncedTables.length === 0) {
-      return NextResponse.json({
-        success: true,
-        value: 0,
-        message: `Table "${kpi.table}" not found or not synced`,
-      })
+    // Build the aggregation SQL based on the aggregation type
+    const jsonPath = `$.${column}`
+    let aggregationSQL: string
+
+    switch (aggregation) {
+      case "count":
+        aggregationSQL = `COUNT(*) as result`
+        break
+      case "sum":
+        aggregationSQL = `COALESCE(SUM(
+          CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '${jsonPath}')) AS DECIMAL(20,2))
+        ), 0) as result`
+        break
+      case "avg":
+        aggregationSQL = `COALESCE(AVG(
+          CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '${jsonPath}')) AS DECIMAL(20,2))
+        ), 0) as result`
+        break
+      case "min":
+        aggregationSQL = `COALESCE(MIN(
+          CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '${jsonPath}')) AS DECIMAL(20,2))
+        ), 0) as result`
+        break
+      case "max":
+        aggregationSQL = `COALESCE(MAX(
+          CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '${jsonPath}')) AS DECIMAL(20,2))
+        ), 0) as result`
+        break
+      default:
+        aggregationSQL = `COUNT(*) as result`
     }
 
-    const tableId = syncedTables[0].id
-
-    // Get all data from the synced table
-    const rows = await query<DataRow>(
-      `SELECT data FROM synced_data WHERE synced_table_id = ?`,
-      [tableId]
+    // OPTIMIZED: Query directly on synced_data using denormalized columns - no JOIN!
+    const mainResult = await query<AggregationResult>(
+      `SELECT ${aggregationSQL}, COUNT(*) as row_count
+       FROM synced_data
+       WHERE database_id = ? AND table_name = ?`,
+      [databaseId, table]
     )
 
-    if (rows.length === 0) {
+    if (mainResult.length === 0 || mainResult[0].row_count === 0) {
       return NextResponse.json({
         success: true,
+        kpiId: kpi.id,
         value: 0,
         growth: 0,
         message: "No data available",
       })
     }
 
-    // Parse all row data
-    const parsedRows = rows.map(row => {
-      try {
-        return typeof row.data === 'string' ? JSON.parse(row.data) : row.data
-      } catch {
-        return {}
-      }
-    }).filter(row => Object.keys(row).length > 0)
+    const value = parseFloat(String(mainResult[0].result)) || 0
+    const rowCount = mainResult[0].row_count
 
-    // Calculate the KPI value
-    const column = kpi.column
-    const aggregation = kpi.aggregation
-
-    const values = parsedRows.map(row => {
-      const val = row[column]
-      if (typeof val === 'number') return val
-      if (typeof val === 'string') {
-        const parsed = parseFloat(val)
-        return isNaN(parsed) ? 1 : parsed
-      }
-      return 1
-    })
-
-    let value: number
-    switch (aggregation) {
-      case "count":
-        value = parsedRows.length
-        break
-      case "sum":
-        value = values.reduce((a, b) => a + b, 0)
-        break
-      case "avg":
-        value = values.length > 0 ? values.reduce((a, b) => a + b, 0) / values.length : 0
-        break
-      case "min":
-        value = values.length > 0 ? values.reduce((min, v) => v < min ? v : min, values[0]) : 0
-        break
-      case "max":
-        value = values.length > 0 ? values.reduce((max, v) => v > max ? v : max, values[0]) : 0
-        break
-      default:
-        value = parsedRows.length
-    }
-
-    // Calculate growth if requested (comparing with previous period)
+    // Simplified growth calculation - skip if data is small or no compareWith
+    // Growth calculation can be expensive, so we'll only do it for count aggregation
+    // and use synced_at instead of trying to parse JSON dates
     let growth = 0
-    if (kpi.compareWith === "previous_period") {
-      // Find date column
-      const dateColumn = findDateColumn(parsedRows)
-      if (dateColumn) {
-        const now = new Date()
-        const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
-        const sixtyDaysAgo = new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000)
+    if (kpi.compareWith === "previous_period" && aggregation === "count") {
+      try {
+        // OPTIMIZED: No JOIN needed - use denormalized columns with composite index
+        const recentResult = await query<{ cnt: number }>(
+          `SELECT COUNT(*) as cnt
+           FROM synced_data
+           WHERE database_id = ? 
+             AND table_name = ?
+             AND synced_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)`,
+          [databaseId, table]
+        )
 
-        const recentRows = parsedRows.filter(row => {
-          const date = parseDate(row[dateColumn])
-          return date && date >= thirtyDaysAgo
-        })
+        const previousResult = await query<{ cnt: number }>(
+          `SELECT COUNT(*) as cnt
+           FROM synced_data
+           WHERE database_id = ? 
+             AND table_name = ?
+             AND synced_at >= DATE_SUB(NOW(), INTERVAL 60 DAY)
+             AND synced_at < DATE_SUB(NOW(), INTERVAL 30 DAY)`,
+          [databaseId, table]
+        )
 
-        const previousRows = parsedRows.filter(row => {
-          const date = parseDate(row[dateColumn])
-          return date && date >= sixtyDaysAgo && date < thirtyDaysAgo
-        })
+        const recentCount = recentResult[0]?.cnt || 0
+        const previousCount = previousResult[0]?.cnt || 0
 
-        const recentValue = calculateAggregation(recentRows, column, aggregation)
-        const previousValue = calculateAggregation(previousRows, column, aggregation)
-
-        if (previousValue > 0) {
-          growth = ((recentValue - previousValue) / previousValue) * 100
+        if (previousCount > 0) {
+          growth = ((recentCount - previousCount) / previousCount) * 100
         }
+      } catch {
+        // Growth calculation failed, keep growth = 0
       }
     }
 
@@ -145,7 +131,7 @@ export async function POST(req: Request) {
       kpiId: kpi.id,
       value: Math.round(value * 100) / 100,
       growth: Math.round(growth * 10) / 10,
-      rowCount: parsedRows.length,
+      rowCount,
     })
   } catch (error: unknown) {
     console.error("KPI data error:", error)
@@ -156,72 +142,3 @@ export async function POST(req: Request) {
     )
   }
 }
-
-function findDateColumn(rows: Record<string, unknown>[]): string | null {
-  if (rows.length === 0) return null
-  
-  const firstRow = rows[0]
-  const dateKeywords = ['created_at', 'updated_at', 'date', 'timestamp', 'time', 'created', 'modified']
-  
-  for (const key of Object.keys(firstRow)) {
-    const lowerKey = key.toLowerCase()
-    if (dateKeywords.some(keyword => lowerKey.includes(keyword))) {
-      const value = firstRow[key]
-      if (parseDate(value)) {
-        return key
-      }
-    }
-  }
-  
-  return null
-}
-
-function parseDate(value: unknown): Date | null {
-  if (!value) return null
-  
-  if (value instanceof Date) return value
-  
-  if (typeof value === 'string') {
-    const date = new Date(value)
-    if (!isNaN(date.getTime())) return date
-  }
-  
-  if (typeof value === 'number') {
-    const date = new Date(value > 1e12 ? value : value * 1000)
-    if (!isNaN(date.getTime())) return date
-  }
-  
-  return null
-}
-
-function calculateAggregation(
-  rows: Record<string, unknown>[],
-  column: string,
-  aggregation: string
-): number {
-  const values = rows.map(row => {
-    const val = row[column]
-    if (typeof val === 'number') return val
-    if (typeof val === 'string') {
-      const parsed = parseFloat(val)
-      return isNaN(parsed) ? 1 : parsed
-    }
-    return 1
-  })
-
-  switch (aggregation) {
-    case "count":
-      return rows.length
-    case "sum":
-      return values.reduce((a, b) => a + b, 0)
-    case "avg":
-      return values.length > 0 ? values.reduce((a, b) => a + b, 0) / values.length : 0
-    case "min":
-      return values.length > 0 ? values.reduce((min, v) => v < min ? v : min, values[0]) : 0
-    case "max":
-      return values.length > 0 ? values.reduce((max, v) => v > max ? v : max, values[0]) : 0
-    default:
-      return rows.length
-  }
-}
-

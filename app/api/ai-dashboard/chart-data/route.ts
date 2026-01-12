@@ -18,17 +18,20 @@ interface ChartDataRequest {
   }
 }
 
-interface SyncedTable {
-  id: string
-  table_name: string
+interface GroupedResult {
+  group_key: string
+  result: string | number
 }
 
-interface DataRow {
-  data: string
+interface SingleResult {
+  result: string | number
+  row_count: number
 }
 
 /**
- * Fetch data for a specific chart based on AI configuration
+ * Fetch chart data using MySQL aggregation for better performance
+ * OPTIMIZED: Uses denormalized database_id/table_name columns to avoid JOINs
+ * With improved date handling for multiple formats
  */
 export async function POST(req: Request) {
   try {
@@ -41,209 +44,236 @@ export async function POST(req: Request) {
       )
     }
 
-    // Get the synced table ID
-    const syncedTables = await query<SyncedTable>(
-      `SELECT id, table_name FROM synced_tables WHERE database_id = ? AND table_name = ?`,
-      [databaseId, chart.table]
-    )
+    const { table, columns, aggregation, type } = chart
+    const xColumn = columns.x
+    const yColumn = columns.y
+    const groupBy = columns.groupBy
 
-    if (syncedTables.length === 0) {
-      return NextResponse.json({
-        success: true,
-        data: [],
-        message: `Table "${chart.table}" not found or not synced`,
-      })
+    // Build the aggregation expression
+    const yPath = `$.${yColumn}`
+    let aggregationExpr: string
+
+    switch (aggregation) {
+      case "count":
+        aggregationExpr = `COUNT(*)`
+        break
+      case "sum":
+        aggregationExpr = `COALESCE(SUM(CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '${yPath}')) AS DECIMAL(20,2))), 0)`
+        break
+      case "avg":
+        aggregationExpr = `COALESCE(AVG(CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '${yPath}')) AS DECIMAL(20,2))), 0)`
+        break
+      case "min":
+        aggregationExpr = `COALESCE(MIN(CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '${yPath}')) AS DECIMAL(20,2))), 0)`
+        break
+      case "max":
+        aggregationExpr = `COALESCE(MAX(CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '${yPath}')) AS DECIMAL(20,2))), 0)`
+        break
+      default:
+        aggregationExpr = `COUNT(*)`
     }
 
-    const tableId = syncedTables[0].id
-
-    // Get all data from the synced table
-    const rows = await query<DataRow>(
-      `SELECT data FROM synced_data WHERE synced_table_id = ?`,
-      [tableId]
-    )
-
-    if (rows.length === 0) {
-      return NextResponse.json({
-        success: true,
-        data: [],
-        message: "No data available",
-      })
-    }
-
-    // Parse all row data
-    const parsedRows = rows.map(row => {
-      try {
-        return typeof row.data === 'string' ? JSON.parse(row.data) : row.data
-      } catch {
-        return {}
-      }
-    }).filter(row => Object.keys(row).length > 0)
-
-    // Process data based on chart type and configuration
     let chartData: Record<string, unknown>[] = []
 
-    const xColumn = chart.columns.x
-    const yColumn = chart.columns.y
-    const groupBy = chart.columns.groupBy
-    const aggregation = chart.aggregation
-
-    if (chart.type === "pie" || groupBy) {
-      // Group by a category
+    // Determine the query type based on chart configuration
+    if (type === "pie" || groupBy) {
+      // Group by a category column
       const groupColumn = groupBy || xColumn
-      const groups: Record<string, number[]> = {}
-
-      parsedRows.forEach(row => {
-        const groupValue = String(row[groupColumn!] || "Unknown")
-        const value = parseFloat(row[yColumn]) || 1
-
-        if (!groups[groupValue]) {
-          groups[groupValue] = []
-        }
-        groups[groupValue].push(value)
-      })
-
-      chartData = Object.entries(groups).map(([name, values]) => {
-        let value: number
-        switch (aggregation) {
-          case "count":
-            value = values.length
-            break
-          case "sum":
-            value = values.reduce((a, b) => a + b, 0)
-            break
-          case "avg":
-            value = values.reduce((a, b) => a + b, 0) / values.length
-            break
-          case "min":
-            value = values.length > 0 ? values.reduce((min, v) => v < min ? v : min, values[0]) : 0
-            break
-          case "max":
-            value = values.length > 0 ? values.reduce((max, v) => v > max ? v : max, values[0]) : 0
-            break
-          default:
-            value = values.length
-        }
-        return { name, value: Math.round(value * 100) / 100 }
-      })
-    } else if (xColumn && isDateColumn(parsedRows, xColumn)) {
-      // Time series data
-      const dateGroups: Record<string, number[]> = {}
-
-      parsedRows.forEach(row => {
-        const dateValue = row[xColumn]
-        if (!dateValue) return
-
-        const date = parseDate(dateValue)
-        if (!date) return
-
-        const dateKey = date.toISOString().split('T')[0]
-        const value = parseFloat(row[yColumn]) || 1
-
-        if (!dateGroups[dateKey]) {
-          dateGroups[dateKey] = []
-        }
-        dateGroups[dateKey].push(value)
-      })
-
-      // Sort by date and format
-      chartData = Object.entries(dateGroups)
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([dateKey, values]) => {
-          let value: number
-          switch (aggregation) {
-            case "count":
-              value = values.length
-              break
-            case "sum":
-              value = values.reduce((a, b) => a + b, 0)
-              break
-            case "avg":
-              value = values.reduce((a, b) => a + b, 0) / values.length
-              break
-            case "min":
-              value = values.length > 0 ? values.reduce((min, v) => v < min ? v : min, values[0]) : 0
-              break
-            case "max":
-              value = values.length > 0 ? values.reduce((max, v) => v > max ? v : max, values[0]) : 0
-              break
-            default:
-              value = values.length
-          }
-          
-          const date = new Date(dateKey)
-          const displayDate = date.toLocaleDateString("en-US", { month: "short", day: "numeric" })
-          
-          return { date: displayDate, value: Math.round(value * 100) / 100 }
+      if (!groupColumn) {
+        return NextResponse.json({
+          success: true,
+          chartId: chart.id,
+          data: [],
+          message: "No group column specified for pie chart",
         })
-    } else if (xColumn) {
-      // Category-based data
-      const categories: Record<string, number[]> = {}
-
-      parsedRows.forEach(row => {
-        const category = String(row[xColumn] || "Unknown")
-        const value = parseFloat(row[yColumn]) || 1
-
-        if (!categories[category]) {
-          categories[category] = []
-        }
-        categories[category].push(value)
-      })
-
-      chartData = Object.entries(categories).map(([category, values]) => {
-        let value: number
-        switch (aggregation) {
-          case "count":
-            value = values.length
-            break
-          case "sum":
-            value = values.reduce((a, b) => a + b, 0)
-            break
-          case "avg":
-            value = values.reduce((a, b) => a + b, 0) / values.length
-            break
-          case "min":
-            value = values.length > 0 ? values.reduce((min, v) => v < min ? v : min, values[0]) : 0
-            break
-          case "max":
-            value = values.length > 0 ? values.reduce((max, v) => v > max ? v : max, values[0]) : 0
-            break
-          default:
-            value = values.length
-        }
-        return { category, value: Math.round(value * 100) / 100 }
-      })
-    } else {
-      // Just aggregate the y column
-      const values = parsedRows.map(row => parseFloat(row[yColumn]) || 0)
-      let total: number
-      switch (aggregation) {
-        case "count":
-          total = values.length
-          break
-        case "sum":
-          total = values.reduce((a, b) => a + b, 0)
-          break
-        case "avg":
-          total = values.reduce((a, b) => a + b, 0) / values.length
-          break
-        case "min":
-          total = values.length > 0 ? values.reduce((min, v) => v < min ? v : min, values[0]) : 0
-          break
-        case "max":
-          total = values.length > 0 ? values.reduce((max, v) => v > max ? v : max, values[0]) : 0
-          break
-        default:
-          total = values.length
       }
-      chartData = [{ value: Math.round(total * 100) / 100 }]
+
+      const groupPath = `$.${groupColumn}`
+      // OPTIMIZED: Query directly on synced_data using denormalized columns
+      const results = await query<GroupedResult>(
+        `SELECT 
+          COALESCE(JSON_UNQUOTE(JSON_EXTRACT(data, '${groupPath}')), 'Unknown') as group_key,
+          ${aggregationExpr} as result
+         FROM synced_data
+         WHERE database_id = ? AND table_name = ?
+         GROUP BY group_key
+         ORDER BY result DESC
+         LIMIT 20`,
+        [databaseId, table]
+      )
+
+      chartData = results.map(row => ({
+        name: String(row.group_key),
+        value: Math.round(parseFloat(String(row.result)) * 100) / 100
+      }))
+
+    } else if (xColumn) {
+      // Check if x column looks like a date column
+      const dateKeywords = ['created_at', 'updated_at', 'date', 'timestamp', 'time', 'created', 'modified']
+      const isDateCol = dateKeywords.some(kw => xColumn.toLowerCase().includes(kw))
+
+      if (isDateCol) {
+        // Time series - try to group by date with multiple format support
+        const xPath = `$.${xColumn}`
+        
+        // Try multiple date parsing approaches
+        let results: GroupedResult[] = []
+        
+        // Approach 1: ISO format with T (2024-01-01T10:00:00)
+        try {
+          results = await query<GroupedResult>(
+            `SELECT 
+              DATE(STR_TO_DATE(
+                JSON_UNQUOTE(JSON_EXTRACT(data, '${xPath}')), 
+                '%Y-%m-%dT%H:%i:%s'
+              )) as group_key,
+              ${aggregationExpr} as result
+             FROM synced_data
+             WHERE database_id = ? 
+               AND table_name = ?
+               AND JSON_EXTRACT(data, '${xPath}') IS NOT NULL
+               AND STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(data, '${xPath}')), '%Y-%m-%dT%H:%i:%s') IS NOT NULL
+             GROUP BY group_key
+             ORDER BY group_key ASC
+             LIMIT 60`,
+            [databaseId, table]
+          )
+        } catch { /* Try next format */ }
+
+        // Approach 2: ISO format without T (2024-01-01 10:00:00)
+        if (results.length === 0) {
+          try {
+            results = await query<GroupedResult>(
+              `SELECT 
+                DATE(STR_TO_DATE(
+                  JSON_UNQUOTE(JSON_EXTRACT(data, '${xPath}')), 
+                  '%Y-%m-%d %H:%i:%s'
+                )) as group_key,
+                ${aggregationExpr} as result
+               FROM synced_data
+               WHERE database_id = ? 
+                 AND table_name = ?
+                 AND JSON_EXTRACT(data, '${xPath}') IS NOT NULL
+                 AND STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(data, '${xPath}')), '%Y-%m-%d %H:%i:%s') IS NOT NULL
+               GROUP BY group_key
+               ORDER BY group_key ASC
+               LIMIT 60`,
+              [databaseId, table]
+            )
+          } catch { /* Try next format */ }
+        }
+
+        // Approach 3: Unix timestamp (seconds)
+        if (results.length === 0) {
+          try {
+            results = await query<GroupedResult>(
+              `SELECT 
+                DATE(FROM_UNIXTIME(
+                  CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '${xPath}')) AS UNSIGNED)
+                )) as group_key,
+                ${aggregationExpr} as result
+               FROM synced_data
+               WHERE database_id = ? 
+                 AND table_name = ?
+                 AND JSON_EXTRACT(data, '${xPath}') IS NOT NULL
+                 AND JSON_UNQUOTE(JSON_EXTRACT(data, '${xPath}')) REGEXP '^[0-9]+$'
+               GROUP BY group_key
+               HAVING group_key IS NOT NULL
+               ORDER BY group_key ASC
+               LIMIT 60`,
+              [databaseId, table]
+            )
+          } catch { /* Try next format */ }
+        }
+
+        // Approach 4: Just use the raw value as category (fallback)
+        if (results.length === 0) {
+          try {
+            results = await query<GroupedResult>(
+              `SELECT 
+                SUBSTRING(JSON_UNQUOTE(JSON_EXTRACT(data, '${xPath}')), 1, 10) as group_key,
+                ${aggregationExpr} as result
+               FROM synced_data
+               WHERE database_id = ? 
+                 AND table_name = ?
+                 AND JSON_EXTRACT(data, '${xPath}') IS NOT NULL
+               GROUP BY group_key
+               ORDER BY group_key ASC
+               LIMIT 60`,
+              [databaseId, table]
+            )
+          } catch { /* Give up */ }
+        }
+
+        chartData = results
+          .filter(row => row.group_key !== null)
+          .map(row => {
+            const dateStr = String(row.group_key)
+            let displayDate = dateStr
+            try {
+              const date = new Date(dateStr)
+              if (!isNaN(date.getTime())) {
+                displayDate = date.toLocaleDateString("en-US", { month: "short", day: "numeric" })
+              }
+            } catch {
+              // Keep original string
+            }
+            return {
+              date: displayDate,
+              value: Math.round(parseFloat(String(row.result)) * 100) / 100
+            }
+          })
+
+      } else {
+        // Category-based grouping (not a date column)
+        const xPath = `$.${xColumn}`
+        const results = await query<GroupedResult>(
+          `SELECT 
+            COALESCE(JSON_UNQUOTE(JSON_EXTRACT(data, '${xPath}')), 'Unknown') as group_key,
+            ${aggregationExpr} as result
+           FROM synced_data
+           WHERE database_id = ? AND table_name = ?
+           GROUP BY group_key
+           ORDER BY result DESC
+           LIMIT 20`,
+          [databaseId, table]
+        )
+
+        chartData = results.map(row => ({
+          category: String(row.group_key),
+          value: Math.round(parseFloat(String(row.result)) * 100) / 100
+        }))
+      }
+
+    } else {
+      // No x column - just aggregate the entire table
+      const results = await query<SingleResult>(
+        `SELECT ${aggregationExpr} as result, COUNT(*) as row_count
+         FROM synced_data
+         WHERE database_id = ? AND table_name = ?`,
+        [databaseId, table]
+      )
+
+      if (results.length > 0) {
+        chartData = [{
+          value: Math.round(parseFloat(String(results[0].result)) * 100) / 100
+        }]
+      }
     }
+
+    // Get total row count for reference (optimized - no JOIN)
+    const countResult = await query<{ cnt: number }>(
+      `SELECT COUNT(*) as cnt
+       FROM synced_data
+       WHERE database_id = ? AND table_name = ?`,
+      [databaseId, table]
+    )
 
     return NextResponse.json({
       success: true,
       chartId: chart.id,
       data: chartData,
-      rowCount: parsedRows.length,
+      rowCount: countResult[0]?.cnt || 0,
     })
   } catch (error: unknown) {
     console.error("Chart data error:", error)
@@ -254,48 +284,3 @@ export async function POST(req: Request) {
     )
   }
 }
-
-function isDateColumn(rows: Record<string, unknown>[], column: string): boolean {
-  // Check if the column contains date-like values
-  const sampleValues = rows.slice(0, 10).map(row => row[column])
-  return sampleValues.some(value => {
-    if (!value) return false
-    const date = parseDate(value)
-    return date !== null
-  })
-}
-
-function parseDate(value: unknown): Date | null {
-  if (!value) return null
-  
-  if (value instanceof Date) return value
-  
-  if (typeof value === 'string') {
-    // Try ISO format
-    const isoDate = new Date(value)
-    if (!isNaN(isoDate.getTime())) return isoDate
-    
-    // Try common formats
-    const formats = [
-      /^\d{4}-\d{2}-\d{2}$/,  // YYYY-MM-DD
-      /^\d{4}\/\d{2}\/\d{2}$/,  // YYYY/MM/DD
-      /^\d{2}\/\d{2}\/\d{4}$/,  // MM/DD/YYYY
-    ]
-    
-    for (const format of formats) {
-      if (format.test(value)) {
-        const parsed = new Date(value)
-        if (!isNaN(parsed.getTime())) return parsed
-      }
-    }
-  }
-  
-  if (typeof value === 'number') {
-    // Unix timestamp
-    const date = new Date(value > 1e12 ? value : value * 1000)
-    if (!isNaN(date.getTime())) return date
-  }
-  
-  return null
-}
-

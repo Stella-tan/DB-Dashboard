@@ -128,7 +128,7 @@ export async function syncTableData(
       console.warn(`Warning: Failed to delete old data: ${deleteError.message}`)
     }
     
-    // 4. Prepare records for insertion
+    // 4. Prepare records for insertion (include database_id and table_name for optimized queries)
     const recordsToInsert = externalData.map((row) => {
       // Use row.id if exists, otherwise generate a unique identifier
       const originalId = row.id 
@@ -137,6 +137,8 @@ export async function syncTableData(
       
       return {
         synced_table_id: syncedTable.id,
+        database_id: databaseId,  // Denormalized for faster queries
+        table_name: tableName,    // Denormalized for faster queries
         original_id: originalId,
         data: row,
         synced_at: new Date().toISOString(),

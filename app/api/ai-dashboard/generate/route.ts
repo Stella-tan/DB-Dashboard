@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server"
 import { query } from "@/lib/mysql"
 
-// Auto-create the ai_dashboard_configs table if it doesn't exist
-async function ensureTableExists() {
+// Auto-create the tables if they don't exist
+async function ensureTablesExist() {
   try {
     await query(`
       CREATE TABLE IF NOT EXISTS ai_dashboard_configs (
@@ -16,8 +16,23 @@ async function ensureTableExists() {
         FOREIGN KEY (database_id) REFERENCES external_databases(id) ON DELETE CASCADE
       )
     `)
+    
+    await query(`
+      CREATE TABLE IF NOT EXISTS ai_dashboard_cache (
+        id CHAR(36) PRIMARY KEY DEFAULT (UUID()),
+        database_id CHAR(36) NOT NULL,
+        item_id VARCHAR(100) NOT NULL,
+        item_type ENUM('chart', 'kpi') NOT NULL,
+        config JSON NOT NULL,
+        computed_data JSON NOT NULL,
+        computed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY unique_db_item (database_id, item_id),
+        FOREIGN KEY (database_id) REFERENCES external_databases(id) ON DELETE CASCADE
+      )
+    `)
   } catch (error) {
-    // Table might already exist or foreign key issue - ignore
     console.log("Table check:", error instanceof Error ? error.message : "unknown")
   }
 }
@@ -59,6 +74,21 @@ interface AIResponse {
   reasoning: string
 }
 
+interface GroupedResult {
+  group_key: string
+  result: string | number
+}
+
+interface SingleResult {
+  result: string | number
+  row_count: number
+}
+
+interface AggregationResult {
+  result: string | number | null
+  row_count: number
+}
+
 function generateUUID(): string {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
     const r = Math.random() * 16 | 0
@@ -68,12 +98,334 @@ function generateUUID(): string {
 }
 
 /**
+ * Compute chart data for a given chart configuration
+ */
+async function computeChartData(
+  databaseId: string, 
+  chart: ChartConfig
+): Promise<Record<string, unknown>[]> {
+  const { table, columns, aggregation, type } = chart
+  const xColumn = columns.x
+  const yColumn = columns.y
+  const groupBy = columns.groupBy
+
+  // Build the aggregation expression
+  const yPath = `$.${yColumn}`
+  let aggregationExpr: string
+
+  switch (aggregation) {
+    case "count":
+      aggregationExpr = `COUNT(*)`
+      break
+    case "sum":
+      aggregationExpr = `COALESCE(SUM(CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '${yPath}')) AS DECIMAL(20,2))), 0)`
+      break
+    case "avg":
+      aggregationExpr = `COALESCE(AVG(CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '${yPath}')) AS DECIMAL(20,2))), 0)`
+      break
+    case "min":
+      aggregationExpr = `COALESCE(MIN(CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '${yPath}')) AS DECIMAL(20,2))), 0)`
+      break
+    case "max":
+      aggregationExpr = `COALESCE(MAX(CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '${yPath}')) AS DECIMAL(20,2))), 0)`
+      break
+    default:
+      aggregationExpr = `COUNT(*)`
+  }
+
+  let chartData: Record<string, unknown>[] = []
+
+  try {
+    if (type === "pie" || groupBy) {
+      const groupColumn = groupBy || xColumn
+      if (!groupColumn) return []
+
+      const groupPath = `$.${groupColumn}`
+      const results = await query<GroupedResult>(
+        `SELECT 
+          COALESCE(JSON_UNQUOTE(JSON_EXTRACT(data, '${groupPath}')), 'Unknown') as group_key,
+          ${aggregationExpr} as result
+         FROM synced_data
+         WHERE database_id = ? AND table_name = ?
+         GROUP BY group_key
+         ORDER BY result DESC
+         LIMIT 20`,
+        [databaseId, table]
+      )
+
+      chartData = results.map(row => ({
+        name: String(row.group_key),
+        value: Math.round(parseFloat(String(row.result)) * 100) / 100
+      }))
+
+    } else if (xColumn) {
+      const dateKeywords = ['created_at', 'updated_at', 'date', 'timestamp', 'time', 'created', 'modified']
+      const isDateCol = dateKeywords.some(kw => xColumn.toLowerCase().includes(kw))
+
+      if (isDateCol) {
+        const xPath = `$.${xColumn}`
+        let results: GroupedResult[] = []
+        
+        // Try ISO format with T
+        try {
+          results = await query<GroupedResult>(
+            `SELECT 
+              DATE(STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(data, '${xPath}')), '%Y-%m-%dT%H:%i:%s')) as group_key,
+              ${aggregationExpr} as result
+             FROM synced_data
+             WHERE database_id = ? AND table_name = ?
+               AND JSON_EXTRACT(data, '${xPath}') IS NOT NULL
+               AND STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(data, '${xPath}')), '%Y-%m-%dT%H:%i:%s') IS NOT NULL
+             GROUP BY group_key
+             ORDER BY group_key ASC
+             LIMIT 60`,
+            [databaseId, table]
+          )
+        } catch { /* ignore */ }
+
+        // Try ISO format without T
+        if (results.length === 0) {
+          try {
+            results = await query<GroupedResult>(
+              `SELECT 
+                DATE(STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(data, '${xPath}')), '%Y-%m-%d %H:%i:%s')) as group_key,
+                ${aggregationExpr} as result
+               FROM synced_data
+               WHERE database_id = ? AND table_name = ?
+                 AND JSON_EXTRACT(data, '${xPath}') IS NOT NULL
+                 AND STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(data, '${xPath}')), '%Y-%m-%d %H:%i:%s') IS NOT NULL
+               GROUP BY group_key
+               ORDER BY group_key ASC
+               LIMIT 60`,
+              [databaseId, table]
+            )
+          } catch { /* ignore */ }
+        }
+
+        // Try Unix timestamp
+        if (results.length === 0) {
+          try {
+            results = await query<GroupedResult>(
+              `SELECT 
+                DATE(FROM_UNIXTIME(CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '${xPath}')) AS UNSIGNED))) as group_key,
+                ${aggregationExpr} as result
+               FROM synced_data
+               WHERE database_id = ? AND table_name = ?
+                 AND JSON_EXTRACT(data, '${xPath}') IS NOT NULL
+                 AND JSON_UNQUOTE(JSON_EXTRACT(data, '${xPath}')) REGEXP '^[0-9]+$'
+               GROUP BY group_key
+               HAVING group_key IS NOT NULL
+               ORDER BY group_key ASC
+               LIMIT 60`,
+              [databaseId, table]
+            )
+          } catch { /* ignore */ }
+        }
+
+        // Fallback to raw value
+        if (results.length === 0) {
+          try {
+            results = await query<GroupedResult>(
+              `SELECT 
+                SUBSTRING(JSON_UNQUOTE(JSON_EXTRACT(data, '${xPath}')), 1, 10) as group_key,
+                ${aggregationExpr} as result
+               FROM synced_data
+               WHERE database_id = ? AND table_name = ?
+                 AND JSON_EXTRACT(data, '${xPath}') IS NOT NULL
+               GROUP BY group_key
+               ORDER BY group_key ASC
+               LIMIT 60`,
+              [databaseId, table]
+            )
+          } catch { /* ignore */ }
+        }
+
+        chartData = results
+          .filter(row => row.group_key !== null)
+          .map(row => {
+            const dateStr = String(row.group_key)
+            let displayDate = dateStr
+            try {
+              const date = new Date(dateStr)
+              if (!isNaN(date.getTime())) {
+                displayDate = date.toLocaleDateString("en-US", { month: "short", day: "numeric" })
+              }
+            } catch { /* keep original */ }
+            return {
+              date: displayDate,
+              value: Math.round(parseFloat(String(row.result)) * 100) / 100
+            }
+          })
+
+      } else {
+        const xPath = `$.${xColumn}`
+        const results = await query<GroupedResult>(
+          `SELECT 
+            COALESCE(JSON_UNQUOTE(JSON_EXTRACT(data, '${xPath}')), 'Unknown') as group_key,
+            ${aggregationExpr} as result
+           FROM synced_data
+           WHERE database_id = ? AND table_name = ?
+           GROUP BY group_key
+           ORDER BY result DESC
+           LIMIT 20`,
+          [databaseId, table]
+        )
+
+        chartData = results.map(row => ({
+          category: String(row.group_key),
+          value: Math.round(parseFloat(String(row.result)) * 100) / 100
+        }))
+      }
+
+    } else {
+      const results = await query<SingleResult>(
+        `SELECT ${aggregationExpr} as result, COUNT(*) as row_count
+         FROM synced_data
+         WHERE database_id = ? AND table_name = ?`,
+        [databaseId, table]
+      )
+
+      if (results.length > 0) {
+        chartData = [{
+          value: Math.round(parseFloat(String(results[0].result)) * 100) / 100
+        }]
+      }
+    }
+  } catch (error) {
+    console.error(`Error computing chart ${chart.id}:`, error)
+  }
+
+  return chartData
+}
+
+/**
+ * Compute KPI data for a given KPI configuration
+ */
+async function computeKPIData(
+  databaseId: string, 
+  kpi: KPIConfig
+): Promise<{ value: number; growth: number }> {
+  const { table, column, aggregation } = kpi
+  const jsonPath = `$.${column}`
+  
+  let aggregationSQL: string
+  switch (aggregation) {
+    case "count":
+      aggregationSQL = `COUNT(*) as result`
+      break
+    case "sum":
+      aggregationSQL = `COALESCE(SUM(CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '${jsonPath}')) AS DECIMAL(20,2))), 0) as result`
+      break
+    case "avg":
+      aggregationSQL = `COALESCE(AVG(CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '${jsonPath}')) AS DECIMAL(20,2))), 0) as result`
+      break
+    case "min":
+      aggregationSQL = `COALESCE(MIN(CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '${jsonPath}')) AS DECIMAL(20,2))), 0) as result`
+      break
+    case "max":
+      aggregationSQL = `COALESCE(MAX(CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '${jsonPath}')) AS DECIMAL(20,2))), 0) as result`
+      break
+    default:
+      aggregationSQL = `COUNT(*) as result`
+  }
+
+  try {
+    const mainResult = await query<AggregationResult>(
+      `SELECT ${aggregationSQL}, COUNT(*) as row_count
+       FROM synced_data
+       WHERE database_id = ? AND table_name = ?`,
+      [databaseId, table]
+    )
+
+    if (mainResult.length === 0 || mainResult[0].row_count === 0) {
+      return { value: 0, growth: 0 }
+    }
+
+    const value = parseFloat(String(mainResult[0].result)) || 0
+
+    // Simplified growth calculation
+    let growth = 0
+    if (kpi.compareWith === "previous_period" && aggregation === "count") {
+      try {
+        const recentResult = await query<{ cnt: number }>(
+          `SELECT COUNT(*) as cnt FROM synced_data
+           WHERE database_id = ? AND table_name = ? AND synced_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)`,
+          [databaseId, table]
+        )
+        const previousResult = await query<{ cnt: number }>(
+          `SELECT COUNT(*) as cnt FROM synced_data
+           WHERE database_id = ? AND table_name = ?
+             AND synced_at >= DATE_SUB(NOW(), INTERVAL 60 DAY)
+             AND synced_at < DATE_SUB(NOW(), INTERVAL 30 DAY)`,
+          [databaseId, table]
+        )
+        const recentCount = recentResult[0]?.cnt || 0
+        const previousCount = previousResult[0]?.cnt || 0
+        if (previousCount > 0) {
+          growth = ((recentCount - previousCount) / previousCount) * 100
+        }
+      } catch { /* ignore */ }
+    }
+
+    return { 
+      value: Math.round(value * 100) / 100, 
+      growth: Math.round(growth * 10) / 10 
+    }
+  } catch (error) {
+    console.error(`Error computing KPI ${kpi.id}:`, error)
+    return { value: 0, growth: 0 }
+  }
+}
+
+/**
+ * Cache all chart and KPI data for a dashboard
+ */
+async function cacheAllData(
+  databaseId: string,
+  charts: ChartConfig[],
+  kpis: KPIConfig[]
+): Promise<void> {
+  console.log("   🔄 Caching all chart and KPI data...")
+  
+  // Clear existing cache for this database
+  await query(`DELETE FROM ai_dashboard_cache WHERE database_id = ?`, [databaseId])
+  
+  // Cache all charts
+  for (const chart of charts) {
+    console.log(`      📊 Computing chart: ${chart.title}`)
+    const data = await computeChartData(databaseId, chart)
+    
+    await query(
+      `INSERT INTO ai_dashboard_cache (id, database_id, item_id, item_type, config, computed_data, computed_at)
+       VALUES (?, ?, ?, 'chart', ?, ?, NOW())
+       ON DUPLICATE KEY UPDATE config = VALUES(config), computed_data = VALUES(computed_data), computed_at = NOW()`,
+      [generateUUID(), databaseId, chart.id, JSON.stringify(chart), JSON.stringify(data)]
+    )
+  }
+  
+  // Cache all KPIs
+  for (const kpi of kpis) {
+    console.log(`      📈 Computing KPI: ${kpi.title}`)
+    const data = await computeKPIData(databaseId, kpi)
+    
+    await query(
+      `INSERT INTO ai_dashboard_cache (id, database_id, item_id, item_type, config, computed_data, computed_at)
+       VALUES (?, ?, ?, 'kpi', ?, ?, NOW())
+       ON DUPLICATE KEY UPDATE config = VALUES(config), computed_data = VALUES(computed_data), computed_at = NOW()`,
+      [generateUUID(), databaseId, kpi.id, JSON.stringify(kpi), JSON.stringify(data)]
+    )
+  }
+  
+  console.log("   ✅ All data cached successfully!")
+}
+
+/**
  * Generate AI-powered chart recommendations based on discovered tables
+ * AND pre-compute all chart/KPI data for instant loading
  */
 export async function POST(req: Request) {
   try {
-    // Ensure the config table exists
-    await ensureTableExists()
+    await ensureTablesExist()
     
     const { databaseId, tables } = await req.json() as { 
       databaseId: string
@@ -87,13 +439,11 @@ export async function POST(req: Request) {
       )
     }
 
-    // Get AI API configuration from environment
-    // Priority: AI_API_KEY > OPENAI_API_KEY > OPENROUTER_API_KEY
+    // Get AI API configuration
     let aiApiKey = process.env.AI_API_KEY
     let aiBaseUrl = process.env.AI_BASE_URL
     let aiModel = process.env.AI_MODEL
     
-    // Auto-detect which API to use based on available keys
     if (!aiApiKey && process.env.OPENAI_API_KEY) {
       aiApiKey = process.env.OPENAI_API_KEY
       aiBaseUrl = aiBaseUrl || "https://api.openai.com/v1"
@@ -103,7 +453,6 @@ export async function POST(req: Request) {
       aiBaseUrl = aiBaseUrl || "https://openrouter.ai/api/v1"
       aiModel = aiModel || "openai/gpt-4o-mini"
     } else {
-      // Default to OpenAI if AI_API_KEY is set but no base URL
       aiBaseUrl = aiBaseUrl || "https://api.openai.com/v1"
       aiModel = aiModel || "gpt-4o-mini"
     }
@@ -115,7 +464,6 @@ export async function POST(req: Request) {
       )
     }
 
-    // Log AI configuration
     console.log("\n" + "═".repeat(60))
     console.log("🤖 AI DASHBOARD GENERATION STARTED")
     console.log("═".repeat(60))
@@ -129,7 +477,6 @@ export async function POST(req: Request) {
     })
     console.log("─".repeat(60))
 
-    // Build the prompt with table information
     const tableDescriptions = tables.map(t => {
       const columnList = t.columns.map(c => `  - ${c.name} (${c.type})`).join('\n')
       const sampleStr = t.sampleData.length > 0 
@@ -197,11 +544,7 @@ Remember: Respond ONLY with valid JSON, no other text.`
 
     console.log("📤 SENDING TO AI...")
     console.log("─".repeat(60))
-    console.log("📝 User Prompt Preview (first 500 chars):")
-    console.log(userPrompt.slice(0, 500) + "...")
-    console.log("─".repeat(60))
 
-    // Call AI API
     const aiResponse = await fetch(`${aiBaseUrl}/chat/completions`, {
       method: "POST",
       headers: {
@@ -249,10 +592,8 @@ Remember: Respond ONLY with valid JSON, no other text.`
     console.log(aiContent)
     console.log("─".repeat(60))
 
-    // Parse AI response
     let parsedConfig: AIResponse
     try {
-      // Clean the response - remove markdown code blocks if present
       let cleanContent = aiContent.trim()
       if (cleanContent.startsWith("```json")) {
         cleanContent = cleanContent.slice(7)
@@ -273,7 +614,6 @@ Remember: Respond ONLY with valid JSON, no other text.`
       )
     }
 
-    // Validate and add UUIDs if missing
     if (!parsedConfig.charts) parsedConfig.charts = []
     if (!parsedConfig.kpis) parsedConfig.kpis = []
 
@@ -287,20 +627,18 @@ Remember: Respond ONLY with valid JSON, no other text.`
       id: kpi.id || generateUUID(),
     }))
 
-    // Save to database
+    // Save config to database
     const configJson = JSON.stringify({
       charts: parsedConfig.charts,
       kpis: parsedConfig.kpis,
     })
 
-    // Check if config exists for this database
     const existingConfig = await query<{ id: string }>(
       `SELECT id FROM ai_dashboard_configs WHERE database_id = ?`,
       [databaseId]
     )
 
     if (existingConfig.length > 0) {
-      // Update existing config
       await query(
         `UPDATE ai_dashboard_configs 
          SET config = ?, ai_model = ?, ai_reasoning = ?, updated_at = NOW()
@@ -308,7 +646,6 @@ Remember: Respond ONLY with valid JSON, no other text.`
         [configJson, aiModel, parsedConfig.reasoning || '', databaseId]
       )
     } else {
-      // Insert new config
       await query(
         `INSERT INTO ai_dashboard_configs (id, database_id, config, ai_model, ai_reasoning)
          VALUES (?, ?, ?, ?, ?)`,
@@ -329,14 +666,22 @@ Remember: Respond ONLY with valid JSON, no other text.`
     console.log("─".repeat(60))
     console.log("💡 AI REASONING:")
     console.log(parsedConfig.reasoning || "No reasoning provided")
+    console.log("─".repeat(60))
+
+    // ⚡ PRE-COMPUTE AND CACHE ALL DATA
+    console.log("⚡ PRE-COMPUTING CHART AND KPI DATA...")
+    await cacheAllData(databaseId, parsedConfig.charts, parsedConfig.kpis)
+
     console.log("═".repeat(60))
     console.log("✅ AI DASHBOARD GENERATION COMPLETE!")
+    console.log("   Dashboard will now load instantly from cache.")
     console.log("═".repeat(60) + "\n")
 
     return NextResponse.json({
       success: true,
       config: parsedConfig,
       model: aiModel,
+      cached: true,
     })
   } catch (error: unknown) {
     console.error("AI generation error:", error)
@@ -347,4 +692,3 @@ Remember: Respond ONLY with valid JSON, no other text.`
     )
   }
 }
-
