@@ -15,7 +15,7 @@ import {
   Users, DollarSign, Package, Activity, TrendingUp, Wallet, 
   CheckCircle, Clock, RefreshCw, Sparkles, AlertCircle,
   BarChart3, LineChartIcon, PieChart as PieChartIcon, Zap,
-  Code, Copy, Check
+  Code, Copy, Check, Trash2, Loader2
 } from "lucide-react"
 import { 
   Line, LineChart, Bar, BarChart, Pie, PieChart,
@@ -26,6 +26,7 @@ import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/
 
 interface AIChartGridProps {
   databaseId: string
+  refreshKey?: number
 }
 
 interface ChartConfig {
@@ -68,6 +69,23 @@ interface KPIData {
   growth: number
   loading: boolean
   error?: string
+}
+
+interface CustomChart {
+  id: string
+  config: {
+    title: string
+    chartType: string
+    dataSource: {
+      table: string
+      xAxis: string
+      yAxis: string[]
+    }
+    aggregation: string
+    groupBy: string
+  }
+  data: Record<string, unknown>[]
+  computedAt: string
 }
 
 const COLORS = [
@@ -216,7 +234,7 @@ WHERE database_id = '${databaseId}'
   AND table_name = '${table}';`
 }
 
-export function AIChartGrid({ databaseId }: AIChartGridProps) {
+export function AIChartGrid({ databaseId, refreshKey }: AIChartGridProps) {
   const [loading, setLoading] = useState(true)
   const [generating, setGenerating] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -226,6 +244,10 @@ export function AIChartGrid({ databaseId }: AIChartGridProps) {
   const [kpiDataMap, setKpiDataMap] = useState<Record<string, KPIData>>({})
   const [loadedFromCache, setLoadedFromCache] = useState(false)
   const [cacheTime, setCacheTime] = useState<string | null>(null)
+  
+  // Custom charts state
+  const [customCharts, setCustomCharts] = useState<CustomChart[]>([])
+  const [deletingChartId, setDeletingChartId] = useState<string | null>(null)
   
   // SQL Preview Dialog state
   const [sqlDialogOpen, setSqlDialogOpen] = useState(false)
@@ -257,6 +279,38 @@ export function AIChartGrid({ databaseId }: AIChartGridProps) {
       setTimeout(() => setSqlCopied(false), 2000)
     } catch (err) {
       console.error('Failed to copy:', err)
+    }
+  }
+
+  // Load custom charts
+  const loadCustomCharts = useCallback(async () => {
+    try {
+      const response = await fetch(`/api/ai-dashboard/custom-charts?databaseId=${databaseId}`)
+      const result = await response.json()
+      if (result.success && result.charts) {
+        setCustomCharts(result.charts)
+      }
+    } catch (err) {
+      console.error("Failed to load custom charts:", err)
+    }
+  }, [databaseId])
+
+  // Delete custom chart
+  const deleteCustomChart = async (chartId: string) => {
+    setDeletingChartId(chartId)
+    try {
+      const response = await fetch(
+        `/api/ai-dashboard/custom-charts?databaseId=${databaseId}&chartId=${chartId}`,
+        { method: "DELETE" }
+      )
+      const result = await response.json()
+      if (result.success) {
+        setCustomCharts(prev => prev.filter(c => c.id !== chartId))
+      }
+    } catch (err) {
+      console.error("Failed to delete custom chart:", err)
+    } finally {
+      setDeletingChartId(null)
     }
   }
 
@@ -400,7 +454,15 @@ export function AIChartGrid({ databaseId }: AIChartGridProps) {
   // Initial load
   useEffect(() => {
     loadOrGenerateConfig()
-  }, [loadOrGenerateConfig])
+    loadCustomCharts()
+  }, [loadOrGenerateConfig, loadCustomCharts])
+
+  // Reload custom charts when refreshKey changes
+  useEffect(() => {
+    if (refreshKey !== undefined && refreshKey > 0) {
+      loadCustomCharts()
+    }
+  }, [refreshKey, loadCustomCharts])
 
   // Handle regenerate
   const handleRegenerate = async () => {
@@ -566,7 +628,7 @@ export function AIChartGrid({ databaseId }: AIChartGridProps) {
         </div>
       )}
 
-      {/* Charts */}
+      {/* AI Charts */}
       {config.charts && config.charts.length > 0 && (
         <div className="grid gap-6 md:grid-cols-2">
           {config.charts.map((chart, chartIndex) => {
@@ -626,36 +688,102 @@ export function AIChartGrid({ databaseId }: AIChartGridProps) {
         </div>
       )}
 
+      {/* Custom Charts Section */}
+      {customCharts.length > 0 && (
+        <>
+          <div className="flex items-center gap-2 pt-4">
+            <div className="h-px flex-1 bg-border" />
+            <span className="text-sm text-muted-foreground px-2">Custom Charts</span>
+            <div className="h-px flex-1 bg-border" />
+          </div>
+          <div className="grid gap-6 md:grid-cols-2">
+            {customCharts.map((customChart, chartIndex) => {
+              const chartColor = COLORS[(config?.charts?.length || 0 + chartIndex) % COLORS.length]
+              const chartType = customChart.config.chartType as "line" | "bar" | "pie" | "area"
+              
+              return (
+                <Card key={customChart.id}>
+                  <CardHeader>
+                    <div className="flex items-center justify-between">
+                      <CardTitle>{customChart.config.title}</CardTitle>
+                      <div className="flex items-center gap-1">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7 text-destructive hover:text-destructive hover:bg-destructive/10"
+                          onClick={() => deleteCustomChart(customChart.id)}
+                          title="Delete Chart"
+                          disabled={deletingChartId === customChart.id}
+                        >
+                          {deletingChartId === customChart.id ? (
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                          ) : (
+                            <Trash2 className="w-4 h-4" />
+                          )}
+                        </Button>
+                        {chartType === "line" && <LineChartIcon className="w-5 h-5 text-muted-foreground" />}
+                        {chartType === "bar" && <BarChart3 className="w-5 h-5 text-muted-foreground" />}
+                        {chartType === "pie" && <PieChartIcon className="w-5 h-5 text-muted-foreground" />}
+                        {chartType === "area" && <TrendingUp className="w-5 h-5 text-muted-foreground" />}
+                      </div>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Source: {customChart.config.dataSource.table} • {customChart.config.aggregation}({customChart.config.dataSource.yAxis[0] || 'value'})
+                    </p>
+                  </CardHeader>
+                  <CardContent>
+                    {!customChart.data || customChart.data.length === 0 ? (
+                      <div className="flex items-center justify-center h-64">
+                        <p className="text-sm text-muted-foreground">No data available</p>
+                      </div>
+                    ) : (
+                      <ChartContainer 
+                        config={{ value: { label: customChart.config.dataSource.yAxis[0] || 'value', color: chartColor } }} 
+                        className="h-64"
+                      >
+                        <ResponsiveContainer width="100%" height="100%">
+                          {renderCustomChart(customChart, chartIndex + (config?.charts?.length || 0))}
+                        </ResponsiveContainer>
+                      </ChartContainer>
+                    )}
+                  </CardContent>
+                </Card>
+              )
+            })}
+          </div>
+        </>
+      )}
+
       {/* SQL Preview Dialog */}
       <Dialog open={sqlDialogOpen} onOpenChange={setSqlDialogOpen}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="max-w-2xl w-[calc(100vw-2rem)]">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <Code className="w-5 h-5" />
-              SQL Query - {sqlDialogTitle}
+              <Code className="w-4 h-4 flex-shrink-0" />
+              <span className="truncate">SQL Query - {sqlDialogTitle}</span>
             </DialogTitle>
             <DialogDescription>
               This is the MySQL query used to generate the data for this chart/KPI.
             </DialogDescription>
           </DialogHeader>
-          <div className="relative">
-            <pre className="bg-muted p-4 rounded-lg overflow-x-auto text-sm font-mono">
+          <div className="relative min-w-0">
+            <pre className="bg-muted p-4 rounded-lg overflow-x-auto text-xs font-mono whitespace-pre-wrap break-words max-w-full">
               {sqlDialogContent}
             </pre>
             <Button
               variant="outline"
               size="sm"
-              className="absolute top-2 right-2"
+              className="absolute top-2 right-2 h-7 px-2 text-xs"
               onClick={copySQL}
             >
               {sqlCopied ? (
                 <>
-                  <Check className="w-4 h-4 mr-1 text-green-600" />
-                  Copied!
+                  <Check className="w-3 h-3 mr-1 text-green-600" />
+                  Copied
                 </>
               ) : (
                 <>
-                  <Copy className="w-4 h-4 mr-1" />
+                  <Copy className="w-3 h-3 mr-1" />
                   Copy
                 </>
               )}
@@ -770,6 +898,103 @@ function renderChart(chart: ChartConfig, rawData: unknown, chartIndex: number = 
           <YAxis className="text-xs" />
           <ChartTooltip content={<ChartTooltipContent />} />
           <Bar dataKey={dataKey} fill={chartColor} radius={[4, 4, 0, 0]} />
+        </BarChart>
+      )
+  }
+}
+
+function renderCustomChart(customChart: CustomChart, chartIndex: number = 0) {
+  const data = customChart.data
+  const { chartType, dataSource } = customChart.config
+  const xKey = dataSource.xAxis
+  const yKey = dataSource.yAxis[0]
+  const chartColor = COLORS[chartIndex % COLORS.length]
+
+  if (!data || data.length === 0) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <p className="text-sm text-muted-foreground">No data available</p>
+      </div>
+    )
+  }
+
+  switch (chartType) {
+    case "line":
+      return (
+        <LineChart data={data}>
+          <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
+          <XAxis dataKey={xKey} className="text-xs" />
+          <YAxis className="text-xs" />
+          <ChartTooltip content={<ChartTooltipContent />} />
+          <Line 
+            type="monotone" 
+            dataKey={yKey} 
+            stroke={chartColor} 
+            strokeWidth={2}
+            dot={{ fill: chartColor, strokeWidth: 2 }}
+          />
+        </LineChart>
+      )
+
+    case "bar":
+      return (
+        <BarChart data={data}>
+          <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
+          <XAxis dataKey={xKey} className="text-xs" />
+          <YAxis className="text-xs" />
+          <ChartTooltip content={<ChartTooltipContent />} />
+          <Bar dataKey={yKey} fill={chartColor} radius={[4, 4, 0, 0]} />
+        </BarChart>
+      )
+
+    case "area":
+      return (
+        <AreaChart data={data}>
+          <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
+          <XAxis dataKey={xKey} className="text-xs" />
+          <YAxis className="text-xs" />
+          <ChartTooltip content={<ChartTooltipContent />} />
+          <Area 
+            type="monotone" 
+            dataKey={yKey} 
+            stroke={chartColor} 
+            fill={chartColor} 
+            fillOpacity={0.3}
+          />
+        </AreaChart>
+      )
+
+    case "pie":
+      return (
+        <PieChart>
+          <Pie
+            data={data}
+            cx="50%"
+            cy="50%"
+            labelLine={false}
+            label={({ name, percent }) => `${name || ''} (${(percent * 100).toFixed(0)}%)`}
+            outerRadius={80}
+            fill={chartColor}
+            dataKey={yKey}
+            nameKey={xKey}
+          >
+            {data.map((_, index) => (
+              <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+            ))}
+          </Pie>
+          <ChartTooltip content={<ChartTooltipContent />} />
+          <Legend />
+        </PieChart>
+      )
+
+    default:
+      return (
+        <BarChart data={data}>
+          <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
+          <XAxis dataKey={xKey} className="text-xs" />
+          <YAxis className="text-xs" />
+          <ChartTooltip content={<ChartTooltipContent />} />
+          <Bar dataKey={yKey} fill={chartColor} radius={[4, 4, 0, 0]} />
         </BarChart>
       )
   }

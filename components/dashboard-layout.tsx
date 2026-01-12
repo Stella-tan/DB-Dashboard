@@ -21,12 +21,18 @@ export function DashboardLayout({ databases, chatbots }: DashboardLayoutProps) {
   const [selectedDatabaseId, setSelectedDatabaseId] = useState<string | null>(databases[0]?.id || null)
   const [showChatbots, setShowChatbots] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [chartRefreshKey, setChartRefreshKey] = useState(0)
 
   const selectedDatabase = databases.find((db) => db.id === selectedDatabaseId)
 
   const handleDatabaseAdded = () => {
     // Refresh the page to load new database from server
     router.refresh()
+  }
+
+  const handleChartSaved = () => {
+    // Trigger re-fetch of charts by updating the refresh key
+    setChartRefreshKey(prev => prev + 1)
   }
 
   return (
@@ -44,14 +50,19 @@ export function DashboardLayout({ databases, chatbots }: DashboardLayoutProps) {
       {/* Main Content */}
       <div className="flex flex-col flex-1 overflow-hidden">
         {/* Header */}
-        <DashboardHeader database={selectedDatabase} onMenuClick={() => setSidebarOpen(!sidebarOpen)} sidebarOpen={sidebarOpen} />
+        <DashboardHeader 
+          database={selectedDatabase} 
+          onMenuClick={() => setSidebarOpen(!sidebarOpen)} 
+          sidebarOpen={sidebarOpen}
+          onChartSaved={handleChartSaved}
+        />
 
         {/* Content Area */}
         <div className="flex flex-1 overflow-hidden">
           {/* Chart Grid */}
           <div className="flex-1 overflow-auto p-6">
             {selectedDatabaseId && databases.length > 0 ? (
-              <AIChartGrid databaseId={selectedDatabaseId} />
+              <AIChartGrid databaseId={selectedDatabaseId} refreshKey={chartRefreshKey} />
             ) : databases.length === 0 ? (
               <div className="flex items-center justify-center h-full">
                 <div className="text-center max-w-md">

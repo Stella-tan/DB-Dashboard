@@ -14,7 +14,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Label } from "@/components/ui/label"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Plus } from "lucide-react"
+import { Plus, Loader2 } from "lucide-react"
 import { ChartTypeSelector } from "./chart-type-selector"
 import { DataSourceSelector } from "./data-source-selector"
 import { ChartFilterBuilder } from "./chart-filter-builder"
@@ -23,6 +23,7 @@ import { ChartPreview } from "./chart-preview"
 interface ChartBuilderDialogProps {
   databaseId: string | null
   onSave?: (config: ChartConfig) => void
+  isSaving?: boolean
 }
 
 interface ChartConfig {
@@ -42,7 +43,7 @@ interface ChartConfig {
   groupBy: string
 }
 
-export function ChartBuilderDialog({ databaseId, onSave }: ChartBuilderDialogProps) {
+export function ChartBuilderDialog({ databaseId, onSave, isSaving }: ChartBuilderDialogProps) {
   const [open, setOpen] = useState(false)
   const [config, setConfig] = useState<ChartConfig>({
     title: "New Chart",
@@ -59,8 +60,11 @@ export function ChartBuilderDialog({ databaseId, onSave }: ChartBuilderDialogPro
 
   const handleSave = () => {
     onSave?.(config)
+    // Dialog will close after successful save via parent callback
     setOpen(false)
   }
+
+  const canSave = config.title && config.dataSource.table && config.dataSource.xAxis && config.dataSource.yAxis.length > 0
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -157,10 +161,19 @@ export function ChartBuilderDialog({ databaseId, onSave }: ChartBuilderDialogPro
         </Tabs>
 
         <div className="flex justify-end gap-2 pt-4">
-          <Button variant="outline" onClick={() => setOpen(false)}>
+          <Button variant="outline" onClick={() => setOpen(false)} disabled={isSaving}>
             Cancel
           </Button>
-          <Button onClick={handleSave}>Save Chart</Button>
+          <Button onClick={handleSave} disabled={!canSave || isSaving}>
+            {isSaving ? (
+              <>
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                Saving...
+              </>
+            ) : (
+              "Save Chart"
+            )}
+          </Button>
         </div>
       </DialogContent>
     </Dialog>

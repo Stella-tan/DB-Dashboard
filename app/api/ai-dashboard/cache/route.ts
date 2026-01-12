@@ -27,12 +27,13 @@ export async function GET(req: Request) {
       )
     }
 
-    // Get all cached items for this database
+    // Get all cached items for this database (excluding custom charts)
     const cachedItems = await query<CacheItem>(
       `SELECT id, database_id, item_id, item_type, config, computed_data, computed_at
-       FROM ai_dashboard_cache
-       WHERE database_id = ?
-       ORDER BY item_type DESC, computed_at ASC`,
+      FROM ai_dashboard_cache
+      WHERE database_id = ?
+        AND item_id NOT LIKE 'custom_%'
+      ORDER BY item_type DESC, computed_at ASC`,
       [databaseId]
     )
 
