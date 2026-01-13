@@ -15,12 +15,13 @@ import {
   Users, DollarSign, Package, Activity, TrendingUp, Wallet, 
   CheckCircle, Clock, RefreshCw, Sparkles, AlertCircle,
   BarChart3, LineChartIcon, PieChart as PieChartIcon, Zap,
-  Code, Copy, Check, Trash2, Loader2
+  Code, Copy, Check, Trash2, Loader2,
+  ScatterChart as ScatterChartIcon, Table 
 } from "lucide-react"
-import { 
+import {
   Line, LineChart, Bar, BarChart, Pie, PieChart,
-  Area, AreaChart, CartesianGrid, XAxis, YAxis, 
-  ResponsiveContainer, Cell, Legend
+  Area, AreaChart, CartesianGrid, XAxis, YAxis,
+  ResponsiveContainer, Cell, Legend, Scatter, ScatterChart
 } from "recharts"
 import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart"
 
@@ -210,7 +211,7 @@ WHERE database_id = '${databaseId}'
  */
 function generateKPISQL(kpi: KPIConfig, databaseId: string): string {
   const { table, column, aggregation } = kpi
-  
+
   let aggExpr: string
   switch (aggregation) {
     case 'count':
@@ -244,11 +245,11 @@ export function AIChartGrid({ databaseId, refreshKey }: AIChartGridProps) {
   const [kpiDataMap, setKpiDataMap] = useState<Record<string, KPIData>>({})
   const [loadedFromCache, setLoadedFromCache] = useState(false)
   const [cacheTime, setCacheTime] = useState<string | null>(null)
-  
+
   // Custom charts state
   const [customCharts, setCustomCharts] = useState<CustomChart[]>([])
   const [deletingChartId, setDeletingChartId] = useState<string | null>(null)
-  
+
   // SQL Preview Dialog state
   const [sqlDialogOpen, setSqlDialogOpen] = useState(false)
   const [sqlDialogTitle, setSqlDialogTitle] = useState("")
@@ -328,40 +329,40 @@ export function AIChartGrid({ databaseId, refreshKey }: AIChartGridProps) {
 
         if (cacheResult.success && cacheResult.cached) {
           console.log("⚡ Loaded dashboard from cache (instant!)")
-          
+
           // Build config from cached items
           const charts: ChartConfig[] = cacheResult.charts.map((c: { config: ChartConfig }) => c.config)
           const kpis: KPIConfig[] = cacheResult.kpis.map((k: { config: KPIConfig }) => k.config)
-          
+
           setConfig({ charts, kpis })
           setCacheTime(cacheResult.computedAt)
           setLoadedFromCache(true)
-          
+
           // Set chart data from cache
           const chartData: Record<string, ChartData> = {}
           for (const c of cacheResult.charts) {
             chartData[c.id] = { data: c.data, loading: false }
           }
           setChartDataMap(chartData)
-          
+
           // Set KPI data from cache
           const kpiData: Record<string, KPIData> = {}
           for (const k of cacheResult.kpis) {
-            kpiData[k.id] = { 
-              value: k.data.value, 
-              growth: k.data.growth, 
-              loading: false 
+            kpiData[k.id] = {
+              value: k.data.value,
+              growth: k.data.growth,
+              loading: false
             }
           }
           setKpiDataMap(kpiData)
-          
+
           // Also try to get AI reasoning from config
           const configResponse = await fetch(`/api/ai-dashboard/config?databaseId=${databaseId}`)
           const configResult = await configResponse.json()
           if (configResult.exists && configResult.aiReasoning) {
             setAiReasoning(configResult.aiReasoning)
           }
-          
+
           setLoading(false)
           return
         }
@@ -414,11 +415,11 @@ export function AIChartGrid({ databaseId, refreshKey }: AIChartGridProps) {
       setConfig(generateResult.config)
       setAiReasoning(generateResult.config.reasoning || "")
       setGenerating(false)
-      
+
       // After generation, load from cache (data is now cached)
       const cacheResponse = await fetch(`/api/ai-dashboard/cache?databaseId=${databaseId}`)
       const cacheResult = await cacheResponse.json()
-      
+
       if (cacheResult.success && cacheResult.cached) {
         // Set chart data from cache
         const chartData: Record<string, ChartData> = {}
@@ -426,22 +427,22 @@ export function AIChartGrid({ databaseId, refreshKey }: AIChartGridProps) {
           chartData[c.id] = { data: c.data, loading: false }
         }
         setChartDataMap(chartData)
-        
+
         // Set KPI data from cache
         const kpiData: Record<string, KPIData> = {}
         for (const k of cacheResult.kpis) {
-          kpiData[k.id] = { 
-            value: k.data.value, 
-            growth: k.data.growth, 
-            loading: false 
+          kpiData[k.id] = {
+            value: k.data.value,
+            growth: k.data.growth,
+            loading: false
           }
         }
         setKpiDataMap(kpiData)
-        
+
         setCacheTime(cacheResult.computedAt)
         setLoadedFromCache(true)
       }
-      
+
       setLoading(false)
     } catch (err) {
       console.error("Error loading/generating config:", err)
@@ -672,8 +673,8 @@ export function AIChartGrid({ databaseId, refreshKey }: AIChartGridProps) {
                       <p className="text-sm text-muted-foreground">No data available</p>
                     </div>
                   ) : (
-                    <ChartContainer 
-                      config={{ value: { label: chart.columns?.y || 'value', color: chartColor } }} 
+                    <ChartContainer
+                      config={{ value: { label: chart.columns?.y || 'value', color: chartColor } }}
                       className="h-64"
                     >
                       <ResponsiveContainer width="100%" height="100%">
@@ -699,7 +700,7 @@ export function AIChartGrid({ databaseId, refreshKey }: AIChartGridProps) {
           <div className="grid gap-6 md:grid-cols-2">
             {customCharts.map((customChart, chartIndex) => {
               const chartColor = COLORS[(config?.charts?.length || 0 + chartIndex) % COLORS.length]
-              const chartType = customChart.config.chartType as "line" | "bar" | "pie" | "area"
+              const chartType = customChart.config.chartType as "line" | "bar" | "pie" | "area" | "scatter" | "table"
               
               return (
                 <Card key={customChart.id}>
@@ -725,6 +726,8 @@ export function AIChartGrid({ databaseId, refreshKey }: AIChartGridProps) {
                         {chartType === "bar" && <BarChart3 className="w-5 h-5 text-muted-foreground" />}
                         {chartType === "pie" && <PieChartIcon className="w-5 h-5 text-muted-foreground" />}
                         {chartType === "area" && <TrendingUp className="w-5 h-5 text-muted-foreground" />}
+                        {chartType === "scatter" && <ScatterChartIcon className="w-5 h-5 text-muted-foreground" />}
+                        {chartType === "table" && <Table className="w-5 h-5 text-muted-foreground" />}
                       </div>
                     </div>
                     <p className="text-xs text-muted-foreground">
@@ -737,8 +740,8 @@ export function AIChartGrid({ databaseId, refreshKey }: AIChartGridProps) {
                         <p className="text-sm text-muted-foreground">No data available</p>
                       </div>
                     ) : (
-                      <ChartContainer 
-                        config={{ value: { label: customChart.config.dataSource.yAxis[0] || 'value', color: chartColor } }} 
+                      <ChartContainer
+                        config={{ value: { label: customChart.config.dataSource.yAxis[0] || 'value', color: chartColor } }}
                         className="h-64"
                       >
                         <ResponsiveContainer width="100%" height="100%">
@@ -801,7 +804,7 @@ export function AIChartGrid({ databaseId, refreshKey }: AIChartGridProps) {
 function renderChart(chart: ChartConfig, rawData: unknown, chartIndex: number = 0) {
   // Ensure data is always an array
   const data: Record<string, unknown>[] = Array.isArray(rawData) ? rawData : []
-  
+
   if (data.length === 0) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -809,14 +812,14 @@ function renderChart(chart: ChartConfig, rawData: unknown, chartIndex: number = 
       </div>
     )
   }
-  
-  const dataKey = 'value' in data[0] ? 'value' : 
+
+  const dataKey = 'value' in data[0] ? 'value' :
     Object.keys(data[0]).find(k => k !== 'date' && k !== 'name' && k !== 'category') || 'value'
-  
-  const xKey = 'date' in data[0] ? 'date' : 
+
+  const xKey = 'date' in data[0] ? 'date' :
     'name' in data[0] ? 'name' :
-    'category' in data[0] ? 'category' :
-    Object.keys(data[0])[0]
+      'category' in data[0] ? 'category' :
+        Object.keys(data[0])[0]
 
   // Each chart gets its own color based on its index
   const chartColor = COLORS[chartIndex % COLORS.length]
@@ -829,10 +832,10 @@ function renderChart(chart: ChartConfig, rawData: unknown, chartIndex: number = 
           <XAxis dataKey={xKey} className="text-xs" />
           <YAxis className="text-xs" />
           <ChartTooltip content={<ChartTooltipContent />} />
-          <Line 
-            type="monotone" 
-            dataKey={dataKey} 
-            stroke={chartColor} 
+          <Line
+            type="monotone"
+            dataKey={dataKey}
+            stroke={chartColor}
             strokeWidth={2}
             dot={{ fill: chartColor, strokeWidth: 2 }}
           />
@@ -857,11 +860,11 @@ function renderChart(chart: ChartConfig, rawData: unknown, chartIndex: number = 
           <XAxis dataKey={xKey} className="text-xs" />
           <YAxis className="text-xs" />
           <ChartTooltip content={<ChartTooltipContent />} />
-          <Area 
-            type="monotone" 
-            dataKey={dataKey} 
-            stroke={chartColor} 
-            fill={chartColor} 
+          <Area
+            type="monotone"
+            dataKey={dataKey}
+            stroke={chartColor}
+            fill={chartColor}
             fillOpacity={0.3}
           />
         </AreaChart>
@@ -926,10 +929,10 @@ function renderCustomChart(customChart: CustomChart, chartIndex: number = 0) {
           <XAxis dataKey={xKey} className="text-xs" />
           <YAxis className="text-xs" />
           <ChartTooltip content={<ChartTooltipContent />} />
-          <Line 
-            type="monotone" 
-            dataKey={yKey} 
-            stroke={chartColor} 
+          <Line
+            type="monotone"
+            dataKey={yKey}
+            stroke={chartColor}
             strokeWidth={2}
             dot={{ fill: chartColor, strokeWidth: 2 }}
           />
@@ -954,14 +957,110 @@ function renderCustomChart(customChart: CustomChart, chartIndex: number = 0) {
           <XAxis dataKey={xKey} className="text-xs" />
           <YAxis className="text-xs" />
           <ChartTooltip content={<ChartTooltipContent />} />
-          <Area 
-            type="monotone" 
-            dataKey={yKey} 
-            stroke={chartColor} 
-            fill={chartColor} 
+          <Area
+            type="monotone"
+            dataKey={yKey}
+            stroke={chartColor}
+            fill={chartColor}
             fillOpacity={0.3}
           />
         </AreaChart>
+      )
+    case "scatter":
+      // For scatter plots, transform data to ensure numeric X and Y
+      const scatterData = data.map((row: any, index) => {
+        const xValue = row[xKey]
+        const yValue = parseFloat(row[yKey]) || 0
+
+        const xNumeric = parseFloat(xValue)
+        const xFinal = isNaN(xNumeric) ? index : xNumeric
+
+        return {
+          x: xFinal,
+          y: yValue,
+          name: String(xValue),
+          originalX: xValue,
+        }
+      })
+
+      const xTickFormatter = (value: number) => {
+        const item = scatterData.find(d => d.x === value)
+        return item ? String(item.originalX) : String(value)
+      }
+
+      return (
+        <ScatterChart data={scatterData}>
+          <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
+          <XAxis
+            dataKey="x"
+            className="text-xs"
+            tickFormatter={xTickFormatter}
+            angle={-45}
+            textAnchor="end"
+            height={80}
+            type="number"
+            domain={['dataMin', 'dataMax']}
+            allowDecimals={false}
+          />
+          <YAxis
+            dataKey="y"
+            className="text-xs"
+            type="number"
+          />
+          <ChartTooltip
+            cursor={{ strokeDasharray: '3 3' }}
+            content={({ payload }) => {
+              if (!payload || payload.length === 0) return null
+              const point = payload[0].payload
+              return (
+                <div className="bg-background border rounded-lg p-2 shadow-lg">
+                  <p className="text-xs font-medium">{xKey}: {point.originalX}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {yKey}: {point.y}
+                  </p>
+                </div>
+              )
+            }}
+          />
+          <Legend />
+          <Scatter
+            name={yKey}
+            data={scatterData}
+            fill={chartColor}
+            shape="circle"
+          />
+        </ScatterChart>
+      )
+
+    case "table":
+      return (
+        <div className="h-64 w-full overflow-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-muted">
+              <tr>
+                <th className="p-2 text-left font-medium">{xKey}</th>
+                {customChart.config.dataSource.yAxis.map((key) => (
+                  <th key={key} className="p-2 text-left font-medium">{key}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {data.slice(0, 20).map((row: any, index) => (
+                <tr key={index} className="border-b hover:bg-muted/50">
+                  <td className="p-2">{row[xKey]}</td>
+                  {customChart.config.dataSource.yAxis.map((key) => (
+                    <td key={key} className="p-2">{row[key]}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {data.length > 20 && (
+            <p className="text-xs text-muted-foreground mt-2 text-center">
+              Showing first 20 of {data.length} rows
+            </p>
+          )}
+        </div>
       )
 
     case "pie":

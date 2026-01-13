@@ -2,7 +2,7 @@
 
 import { useMemo } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Line, LineChart, Bar, BarChart, CartesianGrid, XAxis, YAxis, ResponsiveContainer, PieChart, Pie, Cell, Area, AreaChart, Legend, Tooltip } from "recharts"
+import { Line, LineChart, Bar, BarChart, CartesianGrid, XAxis, YAxis, ResponsiveContainer, PieChart, Pie, Cell, Area, AreaChart, Legend, Tooltip, Scatter, ScatterChart } from "recharts"
 import { useSyncedData } from "@/hooks/use-synced-data"
 import { Skeleton } from "@/components/ui/skeleton"
 
@@ -52,24 +52,24 @@ export function ChartPreview({ config, databaseId }: ChartPreviewProps) {
   const chartData = useMemo(() => {
     console.log("[ChartPreview] rawData:", rawData?.length, "rows")
     console.log("[ChartPreview] xAxis:", config.dataSource.xAxis, "yAxis:", config.dataSource.yAxis)
-    
+
     if (!rawData || rawData.length === 0) {
       console.log("[ChartPreview] No rawData available")
       return []
     }
-    
+
     const xAxisKey = config.dataSource.xAxis
     const yAxisKeys = config.dataSource.yAxis || []
-    
+
     if (!xAxisKey || yAxisKeys.length === 0) {
       console.log("[ChartPreview] No axis configured, returning first 10 rows")
       return rawData.slice(0, 10) // Return first 10 rows if no axis configured
     }
-    
+
     // Group data if groupBy is specified
     if (config.groupBy) {
       const grouped: Record<string, any> = {}
-      
+
       rawData.forEach((row: any) => {
         const groupKey = String(row[config.groupBy] || "Unknown")
         if (!grouped[groupKey]) {
@@ -81,7 +81,7 @@ export function ChartPreview({ config, databaseId }: ChartPreviewProps) {
             }, {} as any),
           }
         }
-        
+
         yAxisKeys.forEach((key) => {
           const value = parseFloat(row[key]) || 0
           if (config.aggregation === "sum") {
@@ -97,10 +97,10 @@ export function ChartPreview({ config, databaseId }: ChartPreviewProps) {
           }
         })
       })
-      
+
       return Object.values(grouped)
     }
-    
+
     // Simple mapping without grouping
     return rawData.map((row: any) => {
       const mapped: any = {
@@ -118,7 +118,7 @@ export function ChartPreview({ config, databaseId }: ChartPreviewProps) {
 
   const renderChart = () => {
     console.log("[ChartPreview] renderChart - loading:", loading, "error:", error, "table:", config.dataSource.table, "chartData length:", chartData.length)
-    
+
     if (loading) {
       return <Skeleton className="h-64 w-full" />
     }
@@ -158,13 +158,13 @@ export function ChartPreview({ config, databaseId }: ChartPreviewProps) {
                 <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                 <XAxis dataKey={xAxisKey} tick={{ fill: '#6b7280', fontSize: 12 }} />
                 <YAxis tick={{ fill: '#6b7280', fontSize: 12 }} />
-                <Tooltip 
-                  contentStyle={{ 
-                    backgroundColor: 'white', 
+                <Tooltip
+                  contentStyle={{
+                    backgroundColor: 'white',
                     border: '1px solid #e5e7eb',
                     borderRadius: '8px',
                     boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
-                  }} 
+                  }}
                 />
                 <Legend />
                 {config.dataSource.yAxis.map((key, index) => (
@@ -190,13 +190,13 @@ export function ChartPreview({ config, databaseId }: ChartPreviewProps) {
                 <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                 <XAxis dataKey={xAxisKey} tick={{ fill: '#6b7280', fontSize: 12 }} />
                 <YAxis tick={{ fill: '#6b7280', fontSize: 12 }} />
-                <Tooltip 
-                  contentStyle={{ 
-                    backgroundColor: 'white', 
+                <Tooltip
+                  contentStyle={{
+                    backgroundColor: 'white',
                     border: '1px solid #e5e7eb',
                     borderRadius: '8px',
                     boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
-                  }} 
+                  }}
                 />
                 <Legend />
                 {config.dataSource.yAxis.map((key, index) => (
@@ -219,13 +219,13 @@ export function ChartPreview({ config, databaseId }: ChartPreviewProps) {
                 <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                 <XAxis dataKey={xAxisKey} tick={{ fill: '#6b7280', fontSize: 12 }} />
                 <YAxis tick={{ fill: '#6b7280', fontSize: 12 }} />
-                <Tooltip 
-                  contentStyle={{ 
-                    backgroundColor: 'white', 
+                <Tooltip
+                  contentStyle={{
+                    backgroundColor: 'white',
                     border: '1px solid #e5e7eb',
                     borderRadius: '8px',
                     boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
-                  }} 
+                  }}
                 />
                 <Legend />
                 {config.dataSource.yAxis.map((key, index) => (
@@ -240,6 +240,115 @@ export function ChartPreview({ config, databaseId }: ChartPreviewProps) {
                 ))}
               </AreaChart>
             </ResponsiveContainer>
+          </div>
+        )
+      case "scatter":
+        // For scatter plots, both X and Y must be numeric
+        // Try to parse X-axis as number, fallback to index if not numeric
+        const scatterData = chartData.map((row: any, index) => {
+          const xValue = row[xAxisKey]
+          const yValue = parseFloat(row[config.dataSource.yAxis[0]]) || 0
+
+          // Try to parse X as number, otherwise use index
+          const xNumeric = parseFloat(xValue)
+          const xFinal = isNaN(xNumeric) ? index : xNumeric
+
+          return {
+            x: xFinal,
+            y: yValue,
+            name: String(xValue), // Keep original for labels
+            originalX: xValue,
+          }
+        })
+
+        // Create a mapping for custom tick labels
+        const xTickFormatter = (value: number) => {
+          const item = scatterData.find(d => d.x === value)
+          return item ? String(item.originalX) : String(value)
+        }
+
+        return (
+          <div className="h-64 w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <ScatterChart data={scatterData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                <XAxis
+                  dataKey="x"
+                  tick={{ fill: '#6b7280', fontSize: 11 }}
+                  tickFormatter={xTickFormatter}
+                  angle={-45}
+                  textAnchor="end"
+                  height={80}
+                  type="number"
+                  domain={['dataMin', 'dataMax']}
+                  allowDecimals={false}
+                />
+                <YAxis
+                  dataKey="y"
+                  tick={{ fill: '#6b7280', fontSize: 12 }}
+                  type="number"
+                  name={config.dataSource.yAxis[0]}
+                />
+                <Tooltip
+                  cursor={{ strokeDasharray: '3 3' }}
+                  contentStyle={{
+                    backgroundColor: 'white',
+                    border: '1px solid #e5e7eb',
+                    borderRadius: '8px',
+                    boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
+                  }}
+                  content={({ payload }) => {
+                    if (!payload || payload.length === 0) return null
+                    const data = payload[0].payload
+                    return (
+                      <div className="bg-white border border-gray-200 rounded-lg p-2 shadow-lg">
+                        <p className="text-xs font-medium">{xAxisKey}: {data.originalX}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {config.dataSource.yAxis[0]}: {data.y}
+                        </p>
+                      </div>
+                    )
+                  }}
+                />
+                <Legend />
+                <Scatter
+                  name={config.dataSource.yAxis[0]}
+                  data={scatterData}
+                  fill={getColor(0)}
+                  shape="circle"
+                />
+              </ScatterChart>
+            </ResponsiveContainer>
+          </div>
+        )
+      case "table":
+        return (
+          <div className="h-64 w-full overflow-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-muted">
+                <tr>
+                  <th className="p-2 text-left font-medium">{xAxisKey}</th>
+                  {config.dataSource.yAxis.map((key) => (
+                    <th key={key} className="p-2 text-left font-medium">{key}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {chartData.slice(0, 20).map((row: any, index) => (
+                  <tr key={index} className="border-b">
+                    <td className="p-2">{row[xAxisKey]}</td>
+                    {config.dataSource.yAxis.map((key) => (
+                      <td key={key} className="p-2">{row[key]}</td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {chartData.length > 20 && (
+              <p className="text-xs text-muted-foreground mt-2 text-center">
+                Showing first 20 of {chartData.length} rows
+              </p>
+            )}
           </div>
         )
       case "pie":
@@ -266,13 +375,13 @@ export function ChartPreview({ config, databaseId }: ChartPreviewProps) {
                     <Cell key={`cell-${index}`} fill={getColor(index)} />
                   ))}
                 </Pie>
-                <Tooltip 
-                  contentStyle={{ 
-                    backgroundColor: 'white', 
+                <Tooltip
+                  contentStyle={{
+                    backgroundColor: 'white',
                     border: '1px solid #e5e7eb',
                     borderRadius: '8px',
                     boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
-                  }} 
+                  }}
                 />
                 <Legend />
               </PieChart>
